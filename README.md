@@ -1,93 +1,182 @@
-# fullstack-interview
+# Take-home: Accounting sync & dashboard
 
+You are building an internal tool that mirrors data from a third-party accounting service and
+surfaces it to the finance team.
 
+The infrastructure is already wired up. The interesting parts — the sync, the dashboard, and one
+CRUD feature — are not. That's the exercise.
 
-## Getting started
+**Timebox: two days, and we mean it.** We are looking for roughly 6–8 hours of focused work, not a
+weekend. If you run out of time, stop and write down what you'd do next in `NOTES.md`; an honest
+"here's where I stopped and why" reads better than a rushed half-feature.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Afterwards we'll sit down together and walk through the code. Expect questions about *why*, so
+where you made a judgement call, be ready to defend it.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## What you're given
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+| Piece | Where | State |
+| --- | --- | --- |
+| Mock external accounting API | `mock-service/` (FastAPI, port 8001) | Done. **Do not modify.** |
+| Django + DRF project | `backend/` (port 8000) | Configured; app logic is stubbed out |
+| Celery worker + beat against RabbitMQ | `docker-compose.yml` | Running; no tasks written |
+| Postgres | `docker-compose.yml` (port 5432) | Running |
+| React + TS frontend | `frontend/` (Vite, port 5173) | Scaffolded with one example feature |
+
+Auth and user management are **out of scope**. Don't build login, roles, or permissions. The
+Django admin has a bootstrapped `admin` / `admin` superuser if you want to eyeball the database.
+
+## Setup
+
+```bash
+# Backend, worker, beat, Postgres, RabbitMQ, mock service
+docker compose up --build
+
+# Frontend (no Docker)
+cd frontend
+npm install
+npm run dev
+```
+
+Then:
+
+- App: http://localhost:5173
+- API: http://localhost:8000/api/health/
+- Django admin: http://localhost:8000/admin/ (`admin` / `admin`)
+- Mock accounting API docs: http://localhost:8001/docs
+- RabbitMQ management UI: http://localhost:15672 (`guest` / `guest`)
+
+Useful commands:
+
+```bash
+docker compose exec backend python manage.py makemigrations
+docker compose exec backend python manage.py migrate
+docker compose exec backend pytest
+docker compose logs -f worker beat
+```
+
+---
+
+## The external service
+
+Base URL inside compose: `http://mock-accounting:8001` (from your host: `http://localhost:8001`).
+Auth: `X-API-Key: dev-secret-key`. Both are already in Django settings as
+`EXTERNAL_ACCOUNTING_BASE_URL` / `EXTERNAL_ACCOUNTING_API_KEY`.
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/aliorooji/fullstack-interview.git
-git branch -M main
-git push -uf origin main
+GET /api/v1/invoices?page=1&page_size=50&updated_since=2026-01-01T00:00:00Z
+GET /api/v1/transactions?page=1&page_size=50&updated_since=...
 ```
 
-## Integrate with your tools
+Response:
 
-* [Set up project integrations](https://gitlab.com/aliorooji/fullstack-interview/-/settings/integrations)
+```json
+{
+  "items": [ ... ],
+  "page": 1,
+  "page_size": 50,
+  "total": 240,
+  "next_page": 2
+}
+```
 
-## Collaborate with your team
+Things you need to know about it, because they are all deliberate:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+- `page_size` is **capped at 100**; asking for more is a 422.
+- Results are ordered by `updated_at` ascending.
+- `updated_since` is **inclusive** (`updated_at >= value`), so you will re-fetch records you
+  already have on every incremental run.
+- Money arrives as **decimal strings** (`"1204.50"`), and invoices come in **USD, EUR and GBP**.
+- It fails. Roughly 15% of data requests return 500/502/503, ~10% take 3–8 seconds, and there's a
+  rate limit of 120 requests/minute that answers with 429 + `Retry-After`.
+- The upstream dataset **drifts**: every 60 seconds a handful of invoices change status or get
+  paid, and new invoices appear. `POST /admin/drift` forces it immediately, which is the fastest
+  way to test an incremental sync without waiting.
+- Transactions may reference an invoice you haven't stored yet.
 
-## Test and Deploy
+You may turn `FAILURE_RATE` / `SLOW_RATE` down in `docker-compose.yml` while building. Put them
+back before submitting — we run it at the defaults.
 
-Use the built-in continuous integration in GitLab.
+---
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+## Task 1 — Sync pipeline (the main event)
 
-***
+Mirror invoices and transactions into Postgres with a Celery task.
 
-# Editing this README
+**Must:**
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+1. Run automatically **every 30 minutes** via Celery beat, and be triggerable on demand from the
+   dashboard.
+2. Handle pagination across the full dataset.
+3. Be **idempotent** — running it twice must not duplicate or corrupt data.
+4. Survive the vendor: retries with backoff, respect `Retry-After` on 429, don't hang forever on a
+   slow response, and don't lose a page because one request failed.
+5. Not run two syncs on top of each other.
+6. Record each run (when, how long, outcome, what it touched, what went wrong) so the dashboard can
+   report sync health.
+7. Do incremental syncs after the first one. A full re-scan every 30 minutes is not acceptable, and
+   note that watermarking against an inclusive filter has an edge case worth thinking about.
 
-## Suggestions for a good README
+Design the schema yourself — `backend/apps/accounting/models.py` is empty on purpose.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+**We'd like to see tests here**, at minimum: a second run changes nothing, and a mid-pagination
+failure leaves the database in a sane state. `responses` is installed for stubbing the vendor.
 
-## Name
-Choose a self-explaining name for your project.
+## Task 2 — Dashboard
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+A single page in the React app showing:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+1. Summary figures: total invoices, total outstanding, amount collected this month.
+2. One chart (`@mui/x-charts`) — invoices by status, or collections over time, your call.
+3. Sync health: when the last sync ran, whether it succeeded, how many records it touched.
+4. A **Sync now** button that enqueues the task, gives immediate feedback, and reflects the result
+   when it lands. Polling is fine; websockets are not expected.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Aggregation happens **in the database**. If you find yourself looping over a queryset in Python to
+add up money, stop.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Mixed currencies are your problem to handle. Any defensible answer is fine — sum per currency, or
+pick one and label it — as long as the number on screen isn't quietly wrong.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+## Task 3 — Manual adjustments (form + table)
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Finance needs to record corrections against synced invoices (a write-off, a disputed fee, a
+currency-conversion difference).
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+**Backend:** DRF CRUD for an adjustment — at least an invoice reference, an amount, a reason, and
+created/updated timestamps. Real validation with per-field errors. The list endpoint is paginated
+and filterable/searchable.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+**Frontend:** a react-hook-form + yup form to create and edit, and a table (`@mui/x-data-grid`)
+with server-side pagination, a filter, and edit/delete. Server-side validation errors must land on
+the right field.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Adjustments are ours, not the vendor's — a sync must never overwrite or delete them.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+---
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Ground rules
 
-## License
-For open source projects, say how it is licensed.
+- Stack is fixed: Django, DRF, Celery, RabbitMQ, Postgres on the backend; React, TypeScript, MUI,
+  TanStack Query, react-hook-form, yup on the frontend. See `frontend/AGENTS.md` — those frontend
+  conventions are requirements, not suggestions.
+- Using AI assistance is fine and expected. Understanding every line you submit is also expected.
+- Don't spend time on: authentication, deployment, CI, visual polish beyond "tidy and legible",
+  Docker for the frontend, or 100% test coverage.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## What we care about
+
+Correctness of the sync under failure and repetition; a schema that fits the domain; queries that
+scale; sensible API design; a frontend that follows the conventions and handles loading, error and
+empty states; and clear reasoning.
+
+## Submitting
+
+A git repo (or zip) with your commit history, plus a `NOTES.md` covering:
+
+- How to run anything that isn't just `docker compose up`.
+- The decisions you'd want to defend, and the tradeoffs behind them.
+- What you'd do with another week.
+- Anything you knowingly left broken or unfinished.
