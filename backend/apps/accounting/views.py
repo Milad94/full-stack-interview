@@ -1,9 +1,16 @@
 from rest_framework import mixins, status, viewsets
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from .dashboard import dashboard_summary
 from .models import SyncRun
-from .serializers import SyncRunSerializer
+from .serializers import DashboardSerializer, SyncRunSerializer
 from .sync import enqueue_sync
+
+
+class DashboardView(APIView):
+    def get(self, request):
+        return Response(DashboardSerializer(dashboard_summary()).data)
 
 
 class SyncRunViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):

@@ -56,6 +56,7 @@ class Transaction(models.Model):
     vendor_updated_at = models.DateTimeField()
 
     class Meta:
+        indexes = [models.Index(fields=["type", "occurred_at"], name="transaction_type_occurred_idx")]
         constraints = [
             models.CheckConstraint(condition=models.Q(currency__in=Currency.values), name="transaction_currency_valid"),
             models.CheckConstraint(condition=models.Q(type__in=TransactionType.values), name="transaction_type_valid"),
@@ -81,7 +82,7 @@ class SyncRun(models.Model):
     trigger = models.CharField(max_length=20, default="scheduled")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    started_at = models.DateTimeField(null=True)
+    started_at = models.DateTimeField(null=True, db_index=True)
     finished_at = models.DateTimeField(null=True)
     sources = models.JSONField(default=dict)
     reconciled = models.PositiveIntegerField(default=0)
