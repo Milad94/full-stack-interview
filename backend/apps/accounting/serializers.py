@@ -1,8 +1,16 @@
-"""Serializers.
+from rest_framework import serializers
 
-Manual adjustments need real validation — the frontend surfaces field errors,
-so return them per-field rather than as one opaque message. Think about what an
-invalid adjustment actually looks like in this domain.
-"""
+from .models import SyncRun
 
-from rest_framework import serializers  # noqa: F401
+
+class SyncRunSerializer(serializers.ModelSerializer):
+    duration_seconds = serializers.ReadOnlyField()
+    records_touched = serializers.ReadOnlyField()
+
+    class Meta:
+        model = SyncRun
+        fields = [
+            "id", "trigger", "status", "created_at", "started_at", "finished_at",
+            "duration_seconds", "records_touched", "sources", "reconciled", "unresolved", "error",
+        ]
+        read_only_fields = fields

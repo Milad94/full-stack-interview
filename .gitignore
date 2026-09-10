@@ -6,6 +6,7 @@ venv/
 *.sqlite3
 staticfiles/
 .pytest_cache/
+celerybeat-schedule*
 
 # Node
 node_modules/

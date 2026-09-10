@@ -1,6 +1,7 @@
 import os
 
 from celery import Celery
+from django.conf import settings
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
@@ -8,12 +9,12 @@ app = Celery("accounting")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
-# TODO(candidate): register the periodic sync here (or via django-celery-beat).
-# The broker (RabbitMQ) and a `celery beat` container are already running —
-# see docker-compose.yml. How you schedule it, and what you do about overlapping
-# runs, retries and time limits, is up to you.
-#
-# app.conf.beat_schedule = {...}
+app.conf.beat_schedule = {
+    "accounting-sync": {
+        "task": "accounting.sync_external_data",
+        "schedule": settings.ACCOUNTING_SYNC_INTERVAL_SECONDS,
+    },
+}
 
 
 @app.task(name="config.debug_task")

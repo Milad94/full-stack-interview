@@ -1,14 +1,20 @@
-"""API views.
+from rest_framework import mixins, status, viewsets
+from rest_framework.response import Response
 
-You need, roughly (see README tasks 2 and 3):
+from .models import SyncRun
+from .serializers import SyncRunSerializer
+from .sync import enqueue_sync
 
-  * Dashboard summary data — totals, outstanding amounts, a breakdown to chart,
-    and the state of the most recent sync.
-  * A "sync now" endpoint that enqueues the Celery task and returns immediately.
-  * CRUD for manual adjustments, list endpoint paginated + filterable/searchable.
 
-DRF's pagination and filter backends are already configured in settings.
-Aggregation belongs in the database, not in a Python loop over a queryset.
-"""
+class SyncRunViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    queryset = SyncRun.objects.all()
+    serializer_class = SyncRunSerializer
+    filterset_fields = ["status"]
+    http_method_names = ["get", "post", "head", "options"]
 
-from rest_framework.viewsets import ViewSet  # noqa: F401
+    def create(self, request):
+        run, queued = enqueue_sync()
+        return Response(
+            self.get_serializer(run).data,
+            status=status.HTTP_202_ACCEPTED if queued else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )

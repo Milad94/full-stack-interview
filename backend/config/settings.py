@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -121,6 +123,17 @@ EXTERNAL_ACCOUNTING_API_KEY = env("EXTERNAL_ACCOUNTING_API_KEY", "dev-secret-key
 
 # How often the sync should run. Wire this into your beat schedule.
 ACCOUNTING_SYNC_INTERVAL_SECONDS = int(env("ACCOUNTING_SYNC_INTERVAL_SECONDS", "1800"))
+ACCOUNTING_SYNC_OVERLAP_SECONDS = int(env("ACCOUNTING_SYNC_OVERLAP_SECONDS", "60"))
+ACCOUNTING_SYNC_TIME_LIMIT_SECONDS = int(env("ACCOUNTING_SYNC_TIME_LIMIT_SECONDS", "2400"))
+if ACCOUNTING_SYNC_TIME_LIMIT_SECONDS < 2:
+    raise ImproperlyConfigured("ACCOUNTING_SYNC_TIME_LIMIT_SECONDS must be at least 2")
+ACCOUNTING_SYNC_SOFT_TIME_LIMIT_SECONDS = max(1, ACCOUNTING_SYNC_TIME_LIMIT_SECONDS - 30)
+# Reserve finalization time, then split the remaining time equally. A source
+# never borrows the other source's budget, even when the other finishes early.
+ACCOUNTING_SYNC_SOURCE_TIME_LIMIT_SECONDS = (
+    ACCOUNTING_SYNC_SOFT_TIME_LIMIT_SECONDS
+    - min(30, ACCOUNTING_SYNC_SOFT_TIME_LIMIT_SECONDS / 3)
+) / 2
 
 # ----------------------------------------------------------------- logging
 
