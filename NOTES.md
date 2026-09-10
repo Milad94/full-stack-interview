@@ -1,6 +1,6 @@
 # Phase 1: accounting sync
 
-Scope: README Task 1 backend, plus manual-trigger and run-history APIs, including the configurable whole-sync time limit requested in `notes.md`. Later backend work is documented under Task 2 and Task 3 below; the frontend remains unfinished. No dependencies were added, and the vendor implementation and chaos defaults are unchanged.
+Scope: README Task 1 backend, plus manual-trigger and run-history APIs, including the configurable whole-sync time limit requested in `notes.md`. Later backend work and the completed frontend are documented below. No dependencies were added, and the vendor implementation and chaos defaults are unchanged.
 
 ## Running
 
@@ -75,7 +75,7 @@ References: [PostgreSQL advisory locks](https://www.postgresql.org/docs/16/expli
 
 ## Remaining limits / another week
 
-- Frontend dashboard and adjustments UI remain unimplemented; the later backend phases are documented below.
+- Frontend dashboard and adjustments UI are now implemented; see the frontend phase below for validation and remaining limits.
 - The whole-sync time limit is a configurable operational guard, not a guarantee that the vendor's dataset can be consumed fast enough. If healthy runs hit it repeatedly, investigate throughput and the vendor API before increasing it.
 - Source timers and Celery's soft limit require Python signal handling to run. A native/runtime hang that prevents this is a global worker failure: the hard limit terminates the process, so the other source cannot continue in that same run. Splitting work into isolated processes/tasks would require a different run/lock lifecycle; it is not needed for the supplied HTTP failure model.
 - Worker death can leave a running record until the next lock owner repairs it. Beat/manual runs provide recovery; there is no immediate crash watchdog or durable outbox for the database-to-broker publication gap. A web-process crash before publication can leave a queued record. Inspect prolonged queued status and trigger a new run if necessary.
@@ -93,7 +93,7 @@ References: [PostgreSQL advisory locks](https://www.postgresql.org/docs/16/expli
 
 ## Task 2: dashboard backend
 
-`GET /api/dashboard/` provides the dashboard read model. It reads the local mirror and never calls the vendor or enqueues a sync. The React page remains to be implemented.
+`GET /api/dashboard/` provides the dashboard read model. It reads the local mirror and never calls the vendor or enqueues a sync. The React page is documented in the frontend phase below.
 
 Response fields:
 
@@ -156,6 +156,30 @@ Deriving currency on every read would be smaller but could silently reinterpret 
 
 List queries paginate in PostgreSQL and join the invoice once with `select_related`, avoiding one extra query per adjustment. A composite `(created_at DESC, id DESC)` index supports default listing and the invoice foreign key is indexed. Substring search still scans matching text; a full-text/trigram search index is deferred until measured data size warrants it. Offset pages can shift when rows are created/deleted between requests. Concurrent edits use ordinary CRUD last-write-wins behavior; an audit trail or optimistic concurrency can be added if finance's workflow requires them.
 
-The React form/table and server-error mapping remain for the frontend phase. With another week, confirm sign/posting rules with finance before computing adjusted totals, and evaluate whether edit history or conflict detection is needed.
+The React form/table and server-error mapping are covered in the frontend phase below. With another week, confirm sign/posting rules with finance before computing adjusted totals, and evaluate whether edit history or conflict detection is needed.
 
 Validation: 70 backend tests passed on Python 3.12 / Django 5.2.6 / PostgreSQL 16, including 25 new cases for adjustment CRUD, exact signed amounts, field errors on create/update, required fields, timestamp ownership, currency preservation/reassignment, filters/search/pagination, read-only invoice lookup, database constraints, protected invoice deletion, and adjustment survival through successful/failed/replayed syncs with duplicate and changed vendor payloads. Lists used two queries for both 25-row and 100-row pages. Django system checks and `makemigrations --check --dry-run` passed; all migrations, including `0004_adjustment`, applied successfully to a fresh temporary database. Tests used the existing backend Docker image with the current source mounted and an isolated PostgreSQL container, without changing the project's data, services, port configuration, or vendor chaos defaults. The temporary database was stopped after validation.
+
+## Frontend: dashboard and manual adjustments
+
+Completed Tasks 2 and 3 using the existing React/MUI stack and feature structure. No application dependencies were added. The example health feature was removed; the two existing routes now contain working pages. `frontend/package-lock.json` records the resolved dependencies for reproducible installs. The backend and mock-service source are unchanged.
+
+Run `npm ci` and `npm run dev` in `frontend/`. The existing Vite proxy forwards `/api` to port 8000; use `VITE_API_PROXY_TARGET=http://localhost:<port> npm run dev` for another backend port. Check with `npm run typecheck`, `npm run lint`, `npm run build`, and `npm test`. The tests use Node's built-in runner with TypeScript stripping (Node 22.18+ or Node 24); no test framework was added.
+
+Decisions:
+
+- The dashboard displays server-provided totals separately by currency and labels the collection period/timezone. Money stays as decimal strings through form validation, requests and display; formatting only inserts separators, so even large aggregate totals keep their cents. Adjustments do not alter dashboard totals.
+- A bar chart shows invoice counts by status. Loading, error and empty states are explicit. The layout uses the existing theme and switches to top navigation on small screens; the table scrolls horizontally when necessary.
+- Manual sync requests receive immediate queued feedback and are polled by their returned ID every three seconds until a final status. One Sync status card displays the current manual request or the latest execution, avoiding duplicate details when both APIs describe the same run. A newer scheduled execution replaces an older completed manual request in that card. The latest manual request ID is stored in sessionStorage so navigation/reload in the same tab preserves tracking. The dashboard also refreshes every 15 seconds (three seconds while its last execution is running), making scheduled runs visible. Completing a manual run, including failure after partial progress, invalidates dashboard, invoice and adjustment queries. Polling pauses in background tabs. POST is not retried automatically, and the button prevents repeated submissions while a known sync is active. The backend remains responsible for cross-tab/concurrent-run exclusion.
+- The adjustment dialog serves both create and edit. Invoice search is debounced by 300 ms and returns up to 25 matches; users narrow the search instead of downloading all invoices. Existing selections are populated from the table row, so editing does not depend on finding that invoice on the first lookup page. The stored currency is retained for the original invoice; choosing another invoice displays its currency and an explicit no-conversion message.
+- Yup validates signed, nonzero decimal amounts (up to 16 integer digits and two fractional digits) and a trimmed reason of at most 1,000 characters. DRF field errors map to the corresponding input; non-field/network errors appear inside the dialog. Submission disables controls until it finishes.
+- The DataGrid uses server pagination with 10/25/50/100 rows, plus an explicit Apply/Clear search and currency filter form. Sorting is disabled to avoid sorting only a single server page. Filter/page values are in query keys; previous rows remain visible under a loading indicator between requests. Writes invalidate list queries and return to the first page, including deletion of the only row on a later page. Delete requires confirmation; cancel performs no write.
+
+Validation performed:
+
+- TypeScript checks, ESLint and the production build passed. Four focused tests passed for exact formatting of large totals, signed decimal payloads, invalid amounts and required invoice/reason fields.
+- Headless Chromium checks with controlled API responses passed for queued/running/succeeded/failed syncs, tracking after reload, dashboard refresh after completion, exact large monetary values, empty/error/retry states, create/edit/delete and cancellation, client/server field errors, non-field errors, server search/pagination, and deletion of the last row on page two. No React/page errors were observed. Desktop and mobile screenshots were inspected; the chart's axis height was adjusted so all status labels render.
+- A second browser check used the real Django API through Vite: loaded the dashboard/chart, searched invoices, created one marked test correction, filtered the list, edited the correction with its existing invoice and removed that correction. All operations returned the expected 201/200/204 responses. A real manual sync through Django/RabbitMQ/Celery succeeded with 34 committed create/update operations.
+- Docker validation used the existing temporary Compose override that removes the PostgreSQL host port mapping, because another project owns port 5432. No repository Compose changes or vendor failure-rate changes were made.
+
+Remaining limits: Vite reports a bundle-size warning (about 1.47 MB minified / 454 KB gzip). The straightforward static imports were retained for this exercise; route-level lazy loading is a possible follow-up. Invoice lookup intentionally requires refining searches beyond the first 25 matches. Concurrent adjustment edits retain the backend's last-write-wins behavior, and sync tracking is per browser tab. The temporary browser checks are validation scripts, not an added Playwright dependency or a maintained browser-test suite.

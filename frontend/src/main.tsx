@@ -9,7 +9,10 @@ import App from './App'
 import { queryClient } from './lib/queryClient'
 import { theme } from './theme'
 
-createRoot(document.getElementById('root')!).render(
+const root = document.getElementById('root')
+if (!root) throw new Error('Root element is missing.')
+
+createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={theme}>

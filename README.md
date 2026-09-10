@@ -40,6 +40,18 @@ npm install
 npm run dev
 ```
 
+Frontend checks (run from `frontend/`):
+
+```bash
+npm run typecheck
+npm run lint
+npm run build
+npm test # Money/form boundary tests; requires Node 22.18+ or Node 24.
+```
+
+The frontend uses the Vite `/api` proxy to `http://localhost:8000`. For another backend
+port, start Vite with `VITE_API_PROXY_TARGET=http://localhost:<port> npm run dev`.
+
 Then:
 
 - App: http://localhost:5173

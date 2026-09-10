@@ -9,6 +9,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  Stack,
   Toolbar,
   Typography,
 } from '@mui/material'
@@ -24,26 +25,52 @@ const NAV_ITEMS = [
 
 export function AppLayout({ children }: { children: ReactNode }) {
   return (
-    <Box sx={{ display: 'flex', minHeight: '100vh' }}>
+    <Stack direction="row" sx={{ minHeight: '100vh' }}>
       <AppBar
         position="fixed"
         color="inherit"
         elevation={0}
-        sx={{ zIndex: (t) => t.zIndex.drawer + 1, borderBottom: '1px solid', borderColor: 'divider' }}
+        sx={{
+          zIndex: (t) => t.zIndex.drawer + 1,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+        }}
       >
         <Toolbar>
-          <Typography variant="h6" component="h1" fontWeight={600}>
+          <Typography variant="h6" component="span" fontWeight={600}>
             Accounting
           </Typography>
         </Toolbar>
+        <Stack
+          component="nav"
+          direction="row"
+          sx={{ display: { xs: 'flex', md: 'none' } }}
+          aria-label="Main navigation"
+        >
+          {NAV_ITEMS.map((item) => (
+            <ListItemButton
+              key={item.to}
+              component={NavLink}
+              to={item.to}
+              end={item.to === '/'}
+              sx={{ '&.active': { bgcolor: 'action.selected' } }}
+            >
+              <ListItemText primary={item.label} />
+            </ListItemButton>
+          ))}
+        </Stack>
       </AppBar>
 
       <Drawer
         variant="permanent"
         sx={{
+          display: { xs: 'none', md: 'block' },
           width: DRAWER_WIDTH,
           flexShrink: 0,
-          [`& .MuiDrawer-paper`]: { width: DRAWER_WIDTH, boxSizing: 'border-box' },
+          [`& .MuiDrawer-paper`]: {
+            width: DRAWER_WIDTH,
+            boxSizing: 'border-box',
+          },
         }}
       >
         <Toolbar />
@@ -54,7 +81,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
               component={NavLink}
               to={item.to}
               end={item.to === '/'}
-              sx={{ '&.active': { bgcolor: 'action.selected', fontWeight: 600 } }}
+              sx={{
+                '&.active': { bgcolor: 'action.selected', fontWeight: 600 },
+              }}
             >
               <ListItemIcon>{item.icon}</ListItemIcon>
               <ListItemText primary={item.label} />
@@ -63,12 +92,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </List>
       </Drawer>
 
-      <Box component="main" sx={{ flexGrow: 1, bgcolor: 'background.default' }}>
+      <Box
+        component="main"
+        sx={{ flexGrow: 1, minWidth: 0, bgcolor: 'background.default' }}
+      >
         <Toolbar />
-        <Container maxWidth="xl" sx={{ py: 4 }}>
+        <Container maxWidth="xl" sx={{ py: 4, mt: { xs: 6, md: 0 } }}>
           {children}
         </Container>
       </Box>
-    </Box>
+    </Stack>
   )
 }

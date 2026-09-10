@@ -29,6 +29,7 @@ export function toApiError(error: unknown): ApiError {
         return { message: 'Please fix the highlighted fields.', status, fieldErrors }
       }
       if (typeof data.detail === 'string') return { message: data.detail, status }
+      if (typeof data.error === 'string' && data.error) return { message: data.error, status }
     }
 
     return { message: error.message, status }
