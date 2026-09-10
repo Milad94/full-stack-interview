@@ -3,9 +3,28 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .dashboard import dashboard_summary
-from .models import SyncRun
-from .serializers import DashboardSerializer, SyncRunSerializer
+from .models import Adjustment, Invoice, SyncRun
+from .pagination import AccountingTablePagination
+from .serializers import AdjustmentSerializer, DashboardSerializer, InvoiceSerializer, SyncRunSerializer
 from .sync import enqueue_sync
+
+
+class InvoiceViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Invoice.objects.order_by("external_id", "id")
+    serializer_class = InvoiceSerializer
+    pagination_class = AccountingTablePagination
+    filterset_fields = ["currency", "status"]
+    search_fields = ["external_id", "customer_name", "customer_email"]
+    ordering_fields = ["external_id", "customer_name"]
+
+
+class AdjustmentViewSet(viewsets.ModelViewSet):
+    queryset = Adjustment.objects.select_related("invoice").all()
+    serializer_class = AdjustmentSerializer
+    pagination_class = AccountingTablePagination
+    filterset_fields = ["invoice", "currency"]
+    search_fields = ["reason", "invoice__external_id", "invoice__customer_name"]
+    ordering_fields = ["created_at", "updated_at", "amount", "id"]
 
 
 class DashboardView(APIView):

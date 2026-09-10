@@ -14,7 +14,7 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils import timezone
 from kombu.exceptions import OperationalError
 
-from apps.accounting.models import Invoice, SyncCheckpoint, SyncRun, Transaction
+from apps.accounting.models import Adjustment, Invoice, SyncCheckpoint, SyncRun, Transaction
 from apps.accounting.sync import LOCK_KEY, SourceTimeLimitExceeded, run_sync, sync_lock
 from apps.accounting.tasks import sync_external_data
 from apps.accounting.vendor import InvoicePayload, TransactionPayload, VendorClient, retry_after_seconds
@@ -124,6 +124,38 @@ def test_second_run_leaves_mirror_unchanged_and_uses_inclusive_filter(vendor):
     assert query["updated_since"] == ["2026-01-01T11:59:00+00:00"]
     assert vendor.calls[0].request.headers["X-API-Key"] == "dev-secret-key"
     assert vendor.calls[0].request.req_kwargs["timeout"] == (3.05, 10)
+
+
+@pytest.mark.parametrize("fail_second_page", [False, True])
+def test_adjustments_survive_vendor_updates_failures_and_replay(vendor, fail_second_page):
+    vendor.page("invoices", [invoice()])
+    vendor.page("transactions")
+    assert run_sync().status == "succeeded"
+    inv = Invoice.objects.get()
+    Adjustment.objects.bulk_create([
+        Adjustment(invoice=inv, amount=Decimal("-10.01"), currency="EUR", reason="Write-off"),
+        Adjustment(invoice=inv, amount=Decimal("0.25"), currency="EUR", reason="Disputed fee"),
+    ])
+    before = list(Adjustment.objects.values())
+    vendor.reset()
+    changed = invoice(status="paid", amount_paid="120.01", currency="USD")
+    vendor.page("invoices", [changed, changed], total=2, next_page=2)
+    if fail_second_page:
+        vendor.page("invoices", number=2, status=503)
+    else:
+        vendor.page("invoices", [invoice("INV-2")], number=2, total=2)
+    vendor.page("transactions")
+    assert run_sync().status == ("failed" if fail_second_page else "succeeded")
+    inv.refresh_from_db()
+    assert inv.status == "paid" and inv.currency == "USD"
+    assert list(Adjustment.objects.values()) == before
+
+    vendor.reset()
+    vendor.page("invoices", [changed, invoice("INV-2")])
+    vendor.page("transactions")
+    assert run_sync().status == "succeeded"
+    assert run_sync().status == "succeeded"
+    assert list(Adjustment.objects.values()) == before
 
 
 def test_failed_page_keeps_checkpoint_and_next_run_recovers(vendor):

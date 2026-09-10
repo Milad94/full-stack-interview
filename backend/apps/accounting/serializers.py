@@ -1,6 +1,36 @@
 from rest_framework import serializers
 
-from .models import SyncRun
+from .fields import MoneyField
+from .models import Adjustment, Invoice, SyncRun, validate_nonzero_amount
+
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Invoice
+        fields = ["id", "external_id", "customer_name", "currency", "status"]
+        read_only_fields = fields
+
+
+class AdjustmentSerializer(serializers.ModelSerializer):
+    amount = MoneyField(validators=[validate_nonzero_amount])
+    invoice_external_id = serializers.CharField(source="invoice.external_id", read_only=True)
+    customer_name = serializers.CharField(source="invoice.customer_name", read_only=True)
+
+    class Meta:
+        model = Adjustment
+        fields = [
+            "id", "invoice", "invoice_external_id", "customer_name", "amount", "currency",
+            "reason", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "currency", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        invoice = attrs.get("invoice")
+        # Capture the currency only on creation or an explicit invoice reassignment.
+        # Resubmitting the same invoice in PUT must preserve the original currency.
+        if invoice is not None and (self.instance is None or invoice.pk != self.instance.invoice_id):
+            attrs["currency"] = invoice.currency
+        return attrs
 
 
 class SyncRunSerializer(serializers.ModelSerializer):

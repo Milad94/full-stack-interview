@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -41,6 +42,29 @@ class Invoice(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(condition=models.Q(currency__in=Currency.values), name="invoice_currency_valid"),
+        ]
+
+
+def validate_nonzero_amount(value):
+    if value == 0:
+        raise ValidationError("Amount must not be zero.", code="zero_amount")
+
+
+class Adjustment(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="adjustments")
+    amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[validate_nonzero_amount])
+    # Owned locally: later vendor currency changes must not reinterpret this amount.
+    currency = models.CharField(max_length=3, choices=Currency.choices)
+    reason = models.CharField(max_length=1000)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["-created_at", "-id"], name="adjustment_created_id_idx")]
+        constraints = [
+            models.CheckConstraint(condition=~models.Q(amount=0), name="adjustment_amount_nonzero"),
+            models.CheckConstraint(condition=models.Q(currency__in=Currency.values), name="adjustment_currency_valid"),
         ]
 
 
