@@ -188,6 +188,9 @@ def run_sync(run_id=None):
             )
             run.refresh_from_db()
             return run
+        # Keep RUNNING replayable for late-ack redelivery: a worker may die after
+        # marking the run as running but before finishing it, so RabbitMQ delivers
+        # the same run_id again.
         if run.status not in (SyncRun.Status.QUEUED, SyncRun.Status.RUNNING):
             return run  # Duplicate delivery of an already completed manual task.
         now = timezone.now()
