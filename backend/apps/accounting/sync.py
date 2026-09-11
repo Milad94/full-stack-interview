@@ -10,6 +10,7 @@ from django.conf import settings
 from django.db import DatabaseError, connection, transaction
 from django.db.models import Exists, OuterRef, Subquery
 from django.utils import timezone
+from kombu.exceptions import OperationalError
 
 from .models import Invoice, SyncCheckpoint, SyncRun, Transaction
 from .vendor import InvoicePayload, TransactionPayload, VendorAuthError, VendorClient, VendorError
@@ -47,9 +48,9 @@ def source_time_limit(source, seconds):
 
 @contextmanager
 def sync_lock():
-    # The lock and every ORM write use the SAME session. Losing it aborts the run;
-    # a separate lock connection could die while a data connection kept writing.
     connection.ensure_connection()
+    # The advisory lock belongs to this exact PostgreSQL connection. Django may
+    # reconnect its wrapper after a disconnect, but the new connection would not own the lock.
     session = connection.connection
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_try_advisory_lock(%s)", [LOCK_KEY])
@@ -60,6 +61,8 @@ def sync_lock():
             raise DatabaseError("Sync lost its PostgreSQL lock session")
 
     try:
+        # Return the checker instead of True so the long-running sync can verify
+        # after HTTP waits that it still uses the connection that owns the lock.
         yield check_session if acquired else None
     finally:
         if acquired and connection.connection is session and not session.closed:
@@ -237,16 +240,13 @@ def run_sync(run_id=None):
 
 
 def enqueue_sync():
-    from kombu.exceptions import OperationalError
-
     from .tasks import sync_external_data
 
     run = SyncRun.objects.create(trigger="manual")
     try:
         sync_external_data.apply_async(args=[str(run.pk)], task_id=str(run.pk), retry=False)
     except (OperationalError, OSError):
-        # Only change a queued record: publication may have reached the broker
-        # before its acknowledgement was lost.
+        # Do not overwrite a run that the worker has already started.
         SyncRun.objects.filter(pk=run.pk, status=SyncRun.Status.QUEUED).update(
             status=SyncRun.Status.FAILED, finished_at=timezone.now(), error="Could not enqueue sync",
         )
