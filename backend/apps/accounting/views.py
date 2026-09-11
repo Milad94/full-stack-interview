@@ -10,7 +10,7 @@ from .sync import enqueue_sync
 
 
 class InvoiceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    queryset = Invoice.objects.order_by("external_id", "id")
+    queryset = Invoice.objects.order_by("external_id")
     serializer_class = InvoiceSerializer
     pagination_class = AccountingTablePagination
     search_fields = ["external_id", "customer_name"]
