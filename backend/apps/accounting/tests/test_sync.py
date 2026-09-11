@@ -495,7 +495,6 @@ def test_api_enqueues_and_exposes_pollable_run(client, monkeypatch):
     assert data["status"] == "queued"
     publish.assert_called_once_with(args=[data["id"]], task_id=data["id"], retry=False)
     assert client.get(f"/api/sync-runs/{data['id']}/").json()["status"] == "queued"
-    assert client.get("/api/sync-runs/").json()["results"][0]["id"] == data["id"]
 
 
 def test_broker_failure_returns_503_and_records_failure(client, monkeypatch):

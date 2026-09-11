@@ -29,13 +29,11 @@ class DashboardView(APIView):
         return Response(DashboardSerializer(dashboard_summary()).data)
 
 
-class SyncRunViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class SyncRunViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     queryset = SyncRun.objects.all()
     serializer_class = SyncRunSerializer
-    filterset_fields = ["status"]
-    http_method_names = ["get", "post", "head", "options"]
 
-    def create(self, request):
+    def create(self, _request):
         run, queued = enqueue_sync()
         return Response(
             self.get_serializer(run).data,

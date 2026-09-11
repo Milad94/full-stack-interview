@@ -1,6 +1,6 @@
 # Phase 1: accounting sync
 
-Scope: README Task 1 backend, plus manual-trigger and run-history APIs, including the configurable whole-sync time limit requested in `notes.md`. Later backend work and the completed frontend are documented below. No dependencies were added, and the vendor implementation and chaos defaults are unchanged.
+Scope: README Task 1 backend, plus manual-trigger and polling APIs, including the configurable whole-sync time limit requested in `notes.md`. Later backend work and the completed frontend are documented below. No dependencies were added, and the vendor implementation and chaos defaults are unchanged.
 
 ## Running
 
@@ -30,10 +30,9 @@ Manual trigger and polling:
 ```bash
 curl -X POST http://localhost:8000/api/sync-runs/
 curl http://localhost:8000/api/sync-runs/<id>/
-curl 'http://localhost:8000/api/sync-runs/?status=failed&page=1'
 ```
 
-POST returns HTTP 202 and a durable `id` with `status: queued`; GET by ID is the polling contract. The list is paginated, newest first. Publishing failure returns HTTP 503 with the recorded failure. Requests are separate runs; simultaneous workers skip when the global sync lock is busy. A queued task that starts after another run finishes can execute another incremental sync. There is no queue deduplication or frontend in this phase.
+POST returns HTTP 202 and a durable `id` with `status: queued`; GET by ID is the polling contract. Publishing failure returns HTTP 503 with the recorded failure. Requests are separate runs; simultaneous workers skip when the global sync lock is busy. A queued task that starts after another run finishes can execute another incremental sync. There is no queue deduplication or frontend in this phase.
 
 Statuses: `queued`, `running`, `succeeded`, `failed`, `skipped`, `interrupted`. Each run records timestamps, duration, per-source outcome/filter/checkpoint, pages, scans, received payloads, created/updated/unchanged counts, errors, reconciled links, and unresolved references. `records_touched` counts committed create/update operations (not distinct IDs); repeated identical payloads count as unchanged. Reconciled FK links are stored separately from this count. Partial page progress and its counters commit together. A failure in either source makes the overall run failed, even if the other succeeded.
 
@@ -105,7 +104,7 @@ Response fields:
 
 Empty grouped results are `[]`; absent currencies/statuses have no matching records. The frontend can display zero or an empty state. Money is always a string with two decimal places, including sums larger than an individual row's DecimalField capacity. Pages committed during an ongoing sync can be visible to the dashboard; these queries do not promise an atomic snapshot across both resources.
 
-The existing `POST /api/sync-runs/` supplies immediate HTTP 202 feedback and an ID for the Sync now button; `GET /api/sync-runs/<id>/` supports polling. Refresh the dashboard when that run finishes. The run-history list and broker-failure HTTP 503 behavior remain available.
+The existing `POST /api/sync-runs/` supplies immediate HTTP 202 feedback and an ID for the Sync now button; `GET /api/sync-runs/<id>/` supports polling. Refresh the dashboard when that run finishes. Broker publication failures return HTTP 503.
 
 All counts, sums, subtraction, clamping and grouping execute in PostgreSQL using ORM count/annotate expressions. No invoice/transaction queryset is iterated in Python to calculate figures. The endpoint uses five queries, returns only grouped rows and one run, and has no invoice/transaction joins or N+1 queries. Exact counts/sums still process matching database rows; constant query count does not imply constant database work. Month filtering uses an indexed timestamp range, without applying a month extraction function to the column. Migration `0003_dashboard_query_indexes` adds `(type, occurred_at)` and `SyncRun.started_at` indexes. Apply it with `docker compose exec backend python manage.py migrate`.
 

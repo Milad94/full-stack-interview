@@ -117,11 +117,5 @@ class SyncRun(models.Model):
         ordering = ["-created_at"]
 
     @property
-    def duration_seconds(self):
-        if self.started_at and self.finished_at:
-            return (self.finished_at - self.started_at).total_seconds()
-        return None
-
-    @property
     def records_touched(self):
         return sum(source.get("created", 0) + source.get("updated", 0) for source in self.sources.values())
