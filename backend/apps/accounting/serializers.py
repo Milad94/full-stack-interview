@@ -26,8 +26,8 @@ class AdjustmentSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         invoice = attrs.get("invoice")
-        # Capture the currency only on creation or an explicit invoice reassignment.
-        # Resubmitting the same invoice in PUT must preserve the original currency.
+        # Preserve the stored currency unless this is a new adjustment
+        # or it is reassigned to another invoice.
         if invoice is not None and (self.instance is None or invoice.pk != self.instance.invoice_id):
             attrs["currency"] = invoice.currency
         return attrs
