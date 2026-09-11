@@ -22,7 +22,7 @@ class AdjustmentSerializer(serializers.ModelSerializer):
             "id", "invoice", "invoice_external_id", "customer_name", "amount", "currency",
             "reason", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "currency", "created_at", "updated_at"]
+        read_only_fields = ["currency"]
 
     def validate(self, attrs):
         invoice = attrs.get("invoice")

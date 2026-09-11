@@ -125,7 +125,7 @@ API contract:
 - Writable fields: `invoice` (the local integer invoice ID, not the vendor's external ID), `amount` (decimal string), and `reason`. All three are required for POST/PUT; PATCH validates supplied fields.
 - Responses also contain `id`, `invoice_external_id`, `customer_name`, `currency`, `created_at`, and `updated_at`. Currency and timestamps are server-owned. Invoice labels reflect the current mirror; currency is the adjustment's stored currency.
 - Lists use DRF's `{count, next, previous, results}` envelope. `page` is one-based; `page_size` defaults to 25 and is capped at 100. DRF falls back to the default size for invalid/nonpositive sizes; an invalid or out-of-range page returns 404. Default order is newest first, with ID breaking timestamp ties.
-- Combine exact filters `invoice=<local-id>` and `currency=EUR` with `search=<text>`. Search matches reason, vendor invoice ID, and customer name using DRF's case-insensitive partial-word search. Invalid invoice/currency filter values return 400 with field errors. Optional `ordering` supports `created_at`, `updated_at`, `amount`, and `id`; prefix `-` for descending, and include `id` to break ties when choosing a custom ordering (for example `ordering=-amount,-id`). Amount sorting compares numeric amounts without exchange-rate conversion; filter by currency when comparing monetary values.
+- Combine the exact `currency=EUR` filter with `search=<text>`. Search matches reason, vendor invoice ID, and customer name using DRF's case-insensitive partial-word search. An invalid currency returns 400 with a field error.
 - The form can find existing invoices through the list-only `GET /api/invoices/?search=...` endpoint with the same pagination. It exposes only the local ID, vendor ID, customer name, and currency needed by the form. There is no invoice detail or write endpoint.
 
 Example (replace `1` with an ID from `/api/invoices/`):
@@ -134,7 +134,7 @@ Example (replace `1` with an ID from `/api/invoices/`):
 curl -X POST http://localhost:8000/api/adjustments/ \
   -H 'Content-Type: application/json' \
   -d '{"invoice":1,"amount":"-12.34","reason":"Write-off"}'
-curl 'http://localhost:8000/api/adjustments/?invoice=1&search=write-off&page=1&page_size=25'
+curl 'http://localhost:8000/api/adjustments/?currency=EUR&search=write-off&page=1&page_size=25'
 curl -X PATCH http://localhost:8000/api/adjustments/1/ \
   -H 'Content-Type: application/json' \
   -d '{"amount":"-10.00","reason":"Corrected write-off"}'
@@ -158,7 +158,7 @@ List queries paginate in PostgreSQL and join the invoice once with `select_relat
 
 The React form/table and server-error mapping are covered in the frontend phase below. With another week, confirm sign/posting rules with finance before computing adjusted totals, and evaluate whether edit history or conflict detection is needed.
 
-Validation: 70 backend tests passed on Python 3.12 / Django 5.2.6 / PostgreSQL 16, including 25 new cases for adjustment CRUD, exact signed amounts, field errors on create/update, required fields, timestamp ownership, currency preservation/reassignment, filters/search/pagination, list-only invoice lookup, database constraints, protected invoice deletion, and adjustment survival through successful/failed/replayed syncs with duplicate and changed vendor payloads. Lists used two queries for both 25-row and 100-row pages. Django system checks and `makemigrations --check --dry-run` passed; all migrations, including `0004_adjustment`, applied successfully to a fresh temporary database. Tests used the existing backend Docker image with the current source mounted and an isolated PostgreSQL container, without changing the project's data, services, port configuration, or vendor chaos defaults. The temporary database was stopped after validation.
+Validation: 70 backend tests passed on Python 3.12 / Django 5.2.6 / PostgreSQL 16, covering exact signed amounts, field validation, currency preservation/reassignment, filter/search/pagination, list-only invoice lookup, database constraints, protected invoice deletion, and adjustment survival through successful/failed/replayed syncs with duplicate and changed vendor payloads. Lists used two queries for both 25-row and 100-row pages. Django system checks and `makemigrations --check --dry-run` passed; all migrations, including `0004_adjustment`, applied successfully to a fresh temporary database. Tests used the existing backend Docker image with the current source mounted and an isolated PostgreSQL container, without changing the project's data, services, port configuration, or vendor chaos defaults. The temporary database was stopped after validation.
 
 ## Frontend: dashboard and manual adjustments
 

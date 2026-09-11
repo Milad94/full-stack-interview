@@ -17,12 +17,11 @@ class InvoiceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
 
 class AdjustmentViewSet(viewsets.ModelViewSet):
-    queryset = Adjustment.objects.select_related("invoice").all()
+    queryset = Adjustment.objects.select_related("invoice")
     serializer_class = AdjustmentSerializer
     pagination_class = AccountingTablePagination
-    filterset_fields = ["invoice", "currency"]
+    filterset_fields = ["currency"]
     search_fields = ["reason", "invoice__external_id", "invoice__customer_name"]
-    ordering_fields = ["created_at", "updated_at", "amount", "id"]
 
 
 class DashboardView(APIView):
