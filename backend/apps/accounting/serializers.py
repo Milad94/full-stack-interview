@@ -7,7 +7,7 @@ from .models import Adjustment, Invoice, SyncRun, validate_nonzero_amount
 class InvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
-        fields = ["id", "external_id", "customer_name", "currency", "status"]
+        fields = ["id", "external_id", "customer_name", "currency"]
         read_only_fields = fields
 
 

@@ -156,19 +156,14 @@ def test_list_pagination_filters_search_and_bounded_queries(api, invoices, djang
     assert api.get(URL, {"page": 999}).status_code == 404
 
 
-def test_invoice_lookup_for_form_is_paginated_searchable_and_read_only(api, invoices):
-    response = api.get("/api/invoices/", {"search": "Customer EUR", "currency": "EUR"})
+def test_invoice_lookup_for_form_is_paginated_and_searchable(api, invoices):
+    response = api.get("/api/invoices/", {"search": "Customer EUR"})
     assert response.status_code == 200
     assert response.json()["count"] == 1
     assert response.json()["results"][0] == {
         "id": invoices[0].pk, "external_id": "INV-EUR", "customer_name": "Customer EUR",
-        "currency": "EUR", "status": "open",
+        "currency": "EUR",
     }
-    detail = f"/api/invoices/{invoices[0].pk}/"
-    assert api.get(detail).status_code == 200
-    assert api.post("/api/invoices/", {}, format="json").status_code == 405
-    assert api.patch(detail, {"currency": "USD"}, format="json").status_code == 405
-    assert api.delete(detail).status_code == 405
 
 
 def test_database_protects_adjustment_amount_currency_and_invoice(invoices):

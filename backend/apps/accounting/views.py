@@ -9,13 +9,11 @@ from .serializers import AdjustmentSerializer, DashboardSerializer, InvoiceSeria
 from .sync import enqueue_sync
 
 
-class InvoiceViewSet(viewsets.ReadOnlyModelViewSet):
+class InvoiceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     queryset = Invoice.objects.order_by("external_id", "id")
     serializer_class = InvoiceSerializer
     pagination_class = AccountingTablePagination
-    filterset_fields = ["currency", "status"]
-    search_fields = ["external_id", "customer_name", "customer_email"]
-    ordering_fields = ["external_id", "customer_name"]
+    search_fields = ["external_id", "customer_name"]
 
 
 class AdjustmentViewSet(viewsets.ModelViewSet):
