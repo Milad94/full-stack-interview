@@ -20,19 +20,13 @@ export function SyncStatus({ run }: { run: SyncRun }) {
         color={statusColors[run.status]}
         sx={{ alignSelf: 'flex-start' }}
       />
-      <Typography variant="body2">
-        Requested: {formatDate(run.created_at)}
-      </Typography>
-      <Typography variant="body2">
-        Started: {formatDate(run.started_at)}
-      </Typography>
-      <Typography variant="body2">
-        Finished: {formatDate(run.finished_at)}
-      </Typography>
+      {run.started_at && (
+        <Typography variant="body2">
+          Last run: {formatDate(run.started_at)}
+        </Typography>
+      )}
       <Typography variant="body2">
         {run.records_touched.toLocaleString()} records created or updated
-        {run.duration_seconds !== null &&
-          ` · ${Math.round(run.duration_seconds)} seconds`}
       </Typography>
       {run.status === 'queued' && (
         <Alert severity="info">Queued. Waiting for a worker to start.</Alert>

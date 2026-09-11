@@ -13,8 +13,6 @@ export function useDashboardQuery() {
   return useQuery({
     queryKey: dashboardKeys.all,
     queryFn: fetchDashboard,
-    refetchInterval: (query) =>
-      isSyncActive(query.state.data?.last_sync) ? 3000 : 15000,
   })
 }
 
@@ -31,7 +29,6 @@ export function useSyncRunQuery(id: string | null) {
       return fetchSyncRun(id)
     },
     enabled: Boolean(id),
-    staleTime: 0,
     refetchInterval: (query) =>
       !query.state.data || isSyncActive(query.state.data) ? 3000 : false,
   })

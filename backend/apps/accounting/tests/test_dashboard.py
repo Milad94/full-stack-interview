@@ -95,9 +95,6 @@ def test_collection_month_boundaries(client, monkeypatch, year, month, tz_name):
     with timezone.override(zone):
         data = client.get("/api/dashboard/").json()
     assert data["collected_this_month_by_currency"] == [{"currency": "USD", "amount": "3.03"}]
-    assert data["collection_period"]["timezone"] == tz_name
-    assert datetime.fromisoformat(data["collection_period"]["start"]) == start
-    assert datetime.fromisoformat(data["collection_period"]["end"]) == end
 
 
 def test_last_sync_reports_actual_execution_even_with_newer_queued_or_skipped_requests(client):
@@ -114,7 +111,6 @@ def test_last_sync_reports_actual_execution_even_with_newer_queued_or_skipped_re
     data = client.get("/api/dashboard/").json()["last_sync"]
     assert data["id"] == str(last.pk)
     assert data["status"] == "failed"
-    assert data["duration_seconds"] == 120
     assert data["records_touched"] == 9
     assert data["error"] == "transactions failed"
     assert datetime.fromisoformat(data["started_at"]) == last.started_at

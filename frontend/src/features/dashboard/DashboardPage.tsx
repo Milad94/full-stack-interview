@@ -15,7 +15,7 @@ import { BarChart } from '@mui/x-charts/BarChart'
 import { useTheme } from '@mui/material/styles'
 
 import { toApiError } from '@/lib/apiClient'
-import { formatDate, formatMoney } from '@/lib/format'
+import { formatMoney } from '@/lib/format'
 import { isSyncActive, type CurrencyAmount } from './api'
 import { useDashboardQuery, useStartSync, useSyncRunQuery } from './queries'
 import { SyncStatus } from './SyncStatus'
@@ -56,34 +56,21 @@ export function DashboardPage() {
   const theme = useTheme()
   const dashboard = useDashboardQuery()
   const startSync = useStartSync()
-  const [runId, setRunId] = useState<string | null>(() =>
-    sessionStorage.getItem('accounting.syncRunId'),
-  )
+  const [runId, setRunId] = useState<string | null>(null)
   const [notice, setNotice] = useState(false)
   const run = useSyncRunQuery(runId)
   const data = dashboard.data
   const trackedRun =
     run.data ?? (startSync.data?.id === runId ? startSync.data : undefined)
-  const lastRun = data?.last_sync
-  const displayedRun =
-    trackedRun &&
-    (!lastRun ||
-      trackedRun.id === lastRun.id ||
-      isSyncActive(trackedRun) ||
-      Date.parse(trackedRun.created_at) >
-        Date.parse(lastRun.started_at ?? lastRun.created_at))
-      ? trackedRun
-      : lastRun
+  const displayedRun = trackedRun ?? data?.last_sync
   const busy =
     startSync.isPending ||
-    (Boolean(runId) && run.isPending && !run.error) ||
     isSyncActive(trackedRun) ||
     isSyncActive(data?.last_sync)
 
   function syncNow() {
     startSync.mutate(undefined, {
       onSuccess: (created) => {
-        sessionStorage.setItem('accounting.syncRunId', created.id)
         setRunId(created.id)
         setNotice(true)
       },
@@ -162,13 +149,6 @@ export function DashboardPage() {
               />
             </Grid>
           </Grid>
-          <Typography variant="body2" color="text.secondary">
-            Collections are gross payments, excluding refunds and fees. Period:{' '}
-            {data.collection_period.start.slice(0, 10)} to{' '}
-            {data.collection_period.end.slice(0, 10)} (end exclusive,{' '}
-            {data.collection_period.timezone}). Amounts are separate by
-            currency.
-          </Typography>
           {data.total_invoices === 0 && (
             <Alert severity="info">
               No invoices have been synced yet. Use Sync now to load accounting
@@ -245,12 +225,6 @@ export function DashboardPage() {
           </Card>
         </Grid>
       </Grid>
-      {data && (
-        <Typography variant="caption" color="text.secondary">
-          Dashboard refreshed: {formatDate(data.generated_at)}. Changes from a
-          running sync may appear before it finishes.
-        </Typography>
-      )}
       <Snackbar
         open={notice}
         autoHideDuration={4000}

@@ -16,12 +16,6 @@ def dashboard_summary():
     month_end = (month_start + timedelta(days=32)).replace(day=1)
 
     return {
-        "generated_at": now,
-        "collection_period": {
-            "start": month_start,
-            "end": month_end,  # Exclusive; use an indexed range, not EXTRACT(month).
-            "timezone": timezone.get_current_timezone_name(),
-        },
         "total_invoices": Invoice.objects.count(),
         "outstanding_by_currency": (
             Invoice.objects.filter(status="open")
