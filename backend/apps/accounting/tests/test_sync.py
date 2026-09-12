@@ -280,7 +280,7 @@ def test_repeated_coverage_mismatch_fails_without_checkpoint(vendor):
     assert SyncCheckpoint.objects.get(source="invoices").watermark is None
 
 
-def test_invalid_money_rolls_back_entire_page(vendor):
+def test_invalid_page_is_rejected_before_any_write(vendor):
     vendor.page("invoices", [invoice(), invoice("INV-2", total=120.01)])
     vendor.page("transactions")
     run = run_sync()

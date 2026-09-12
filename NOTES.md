@@ -1,208 +1,121 @@
-# Phase 1: accounting sync
+# Implementation notes
 
-Scope: README Task 1 backend, plus manual-trigger and polling APIs, including the configurable whole-sync time limit requested in `notes.md`. Later backend work and the completed frontend are documented below. No dependencies were added, and the vendor implementation and chaos defaults are unchanged.
+Tasks 1–3 are implemented: accounting sync, the dashboard, and manual adjustments. The supplied stack is retained, no application dependencies were added, and `mock-service/` and its default failure settings are unchanged. [Persian version](NOTES.fa.md).
 
-## Running
+## Running and checking the project
+
+Start the backend services with `docker compose up --build`. Migrations run automatically when the backend starts. On an existing running checkout:
 
 ```bash
-docker compose up --build
-# On an already running checkout:
 docker compose exec backend python manage.py migrate
 docker compose restart worker beat
-# Tests use real PostgreSQL, with responses stubbing HTTP:
 docker compose exec backend pytest
 ```
 
-Beat schedules `accounting.sync_external_data` every 1,800 seconds, configurable with `ACCOUNTING_SYNC_INTERVAL_SECONDS`. New migrations are included under `backend/apps/accounting/migrations/`.
-
-Each Celery sync has a hard execution limit of 2,400 seconds (40 minutes), including requests, backoff, rescans, database work and reconciliation. Change it through `ACCOUNTING_SYNC_TIME_LIMIT_SECONDS` (minimum 2 seconds); Compose passes this environment variable to the backend, worker and beat. For example, `ACCOUNTING_SYNC_TIME_LIMIT_SECONDS=1800 docker compose up -d` recreates them with a 30-minute limit. Queue waiting time is excluded.
-
-The soft limit fires 30 seconds before the hard limit (at least 1 second after execution starts for small configured limits). It records the run as failed, preserves committed pages and completed-source checkpoints, and releases the lock. Any current atomic page write rolls back; run counters are reloaded from the database so rolled-back changes are not reported as saved. A timeout during Retry-After stops the sync; it never sends a premature retry.
-
-The soft and hard limits deliberately produce different application outcomes. When the soft limit is caught, the task reloads the last committed state and immediately finalizes its `SyncRun` as `failed`, with `finished_at` and a specific timeout error; that run is final and will not later be changed to `interrupted`. If this cleanup does not finish, or if only a hard limit is configured, Celery kills the worker child. PostgreSQL then rolls back any open transaction and releases the session advisory lock, so committed data remains consistent, but the application cannot finalize the run itself: its `SyncRun` may remain `running` until a later, different run acquires the lock and repairs it as `interrupted`. The soft limit is therefore not required for database consistency; it is used for immediate, accurate sync-health reporting and graceful cleanup. The hard limit remains the non-catchable safety net that guarantees a stuck cleanup or task cannot hold a worker and the global sync lock indefinitely.
-
-If cleanup itself hangs, Celery terminates the prefork child at the hard limit. Its PostgreSQL session closes and releases the advisory lock. The next lock owner repairs any abandoned running record as interrupted. These limits require the Docker worker's Linux/prefork pool; calling `run_sync()` directly or using Celery eager/solo mode does not enforce them. See [Celery time limits](https://docs.celeryq.dev/en/v5.5.3/userguide/workers.html#time-limits).
-
-Each source also has its own equal time budget, derived from the whole-run limit: the default is 1,170 seconds (19 minutes 30 seconds) per source. We reserve 30 seconds before the whole-task soft limit for reconciliation/finalization; with very small configured limits this reserve scales down to one third of the soft limit. The remaining time is split equally between the two sources. Neither source borrows the other's unused budget. Changing the whole-run setting automatically recalculates both budgets.
-
-One SIGALRM timer covers each entire source traversal, including all HTTP reads, sleeps, page writes and rescans. It interrupts an in-progress wait; it is not just a time check between requests. A source timeout fails only that source, reloads its committed counters after rollback, leaves its incomplete checkpoint unchanged, and proceeds to the other source with a fresh budget while retaining the same global lock. Per-source `time_limit_seconds` is stored with the run. The overall result is failed if either source failed. This uses the main thread of the Linux prefork child and a separate signal from Celery's SIGUSR1 soft limit. See [Python timers](https://docs.python.org/3/library/signal.html#signal.setitimer).
-
-Manual trigger and polling:
+Run the frontend on the host in a separate terminal:
 
 ```bash
-curl -X POST http://localhost:8000/api/sync-runs/
-curl http://localhost:8000/api/sync-runs/<id>/
+cd frontend
+npm ci
+npm run dev
 ```
 
-POST returns HTTP 202 and a durable `id` with `status: queued`; GET by ID is the polling contract. Publishing failure returns HTTP 503 with the recorded failure. Requests are separate runs; simultaneous workers skip when the global sync lock is busy. A queued task that starts after another run finishes can execute another incremental sync. There is no queue deduplication or frontend in this phase.
+Open http://localhost:5173. Vite proxies `/api` to backend port 8000. For another port, use `VITE_API_PROXY_TARGET=http://localhost:<port> npm run dev`.
 
-Statuses: `queued`, `running`, `succeeded`, `failed`, `skipped`, `interrupted`. Each run records timestamps, duration, per-source outcome/filter/checkpoint, pages, scans, received payloads, created/updated/unchanged counts, errors, reconciled links, and unresolved references. `records_touched` counts committed create/update operations (not distinct IDs); repeated identical payloads count as unchanged. Reconciled FK links are stored separately from this count. Partial page progress and its counters commit together. A failure in either source makes the overall run failed, even if the other succeeded.
-
-## ADR-001: independent checkpoints and page commits
-
-Status: accepted for this take-home.
-
-Invoices and transactions have separate checkpoints, time budgets and unique vendor IDs. Each page is validated completely, then upserted in a database transaction. A failing request retries the same page; exhausted retries or the source deadline fail that source and keep its previous checkpoint. Previously committed pages stay visible and are safe to replay. The other source gets its own reserved budget, except for global failures such as invalid credentials or a lost database session. The shared vendor rate limit remains binding on both sources.
-
-Amounts are exact `DecimalField(18, 2)` values validated from decimal strings, with currency retained on each record. No conversion, rounding, or cross-currency aggregation is performed. Current vendor status/type/currency values are validated; a new unsupported value fails that source visibly instead of storing partially understood data. Timestamp equality is not used to skip payloads: two changes can share the same second. Every payload is compared to local fields. Local mirror primary keys remain stable for future adjustments; sync never deletes invoices or transactions.
-
-Currency (`USD`, `EUR`, `GBP`), transaction type (`payment`, `refund`, `fee`) and payment method (`bank_transfer`, `card`, `cash`, `cheque`) are defined once as `TextChoices` in the models and reused by the vendor serializers. Database CHECK constraints also enforce these values on direct ORM/SQL writes. Migration `0002_constrain_currency_and_payments` adds the constraints without converting existing data; existing records were checked for unsupported values before applying it. Supporting additional values later requires updating the choices and generating a migration.
-
-An entire-run transaction would give atomic visibility but hold a transaction open across network waits and discard useful progress on failure. Page commits accept partial visibility to allow simple recovery. At larger volumes, profile per-record writes before replacing them with batched upserts; the current in-bulk page lookup avoids one read per payload and unchanged records incur no write.
-
-Transactions retain `external_invoice_id` independently of their nullable FK. After processing both sources, a database UPDATE attaches all resolvable old and new transactions, even those absent from this incremental response. A missing vendor reference and an unresolved reference remain distinguishable. Unresolved references do not fail the run.
-
-## Incremental boundaries and mutable pagination
-
-`updated_since` is fixed across every page and rescan for a source. On success its watermark advances to the largest observed `updated_at`, capped at the source's scan start (the mock can seed future timestamps). An empty successful scan uses the scan start. Incremental reads overlap by 60 seconds, configurable with `ACCOUNTING_SYNC_OVERLAP_SECONDS`; the inclusive boundary is never advanced by an epsilon. Records with the same timestamp are therefore safe to re-fetch, and future seed dates do not hide current drift.
-
-The 60-second overlap is a deliberate safety margin at the incremental boundary. An inclusive filter protects records whose `updated_at` is exactly equal to the watermark, but it cannot protect a newly visible record whose timestamp falls just before it. That can happen when the application and vendor clocks differ slightly, the two systems retain different timestamp precision, a timestamp is assigned before a transaction becomes visible through a replica/cache, or the live offset-paginated dataset changes while it is being traversed. Starting the next request one minute before the committed watermark replays this vulnerable interval instead of risking a permanently missed update. Replaying is acceptable because vendor IDs are unique and `store_page` performs idempotent upserts, so unchanged records are counted without being duplicated. The tradeoff is a small amount of repeated network and validation work. Sixty seconds is a bounded operational tolerance, not a completeness guarantee: changes backdated or delayed beyond the overlap still require a vendor snapshot, stable cursor, or durable change feed to recover reliably.
-
-Each traversal tracks unique IDs and every reported total. A changed total or an ID count differing from that total triggers a fresh traversal, at most three traversals in total. Each traversal uses its own coverage set, and duplicate payloads are still applied. An unresolved mismatch fails the source without advancing its checkpoint.
-
-This detects some offset-pagination drift; it does not provide snapshot consistency. A matching count cannot prove that every version is current. The initial full scan is particularly sensitive: an old skipped record cannot be recovered by a short incremental overlap. Arbitrarily late/backdated updates outside the overlap are also not guaranteed to be discovered. There is no recurring full rescan. If stronger completeness is required, the next step is a vendor snapshot/change feed or a stable `(updated_at, id)` cursor contract, not unbounded retries. This limitation follows the supplied design notes.
-
-### Strong completeness requires a vendor contract change
-
-The current implementation reduces the chance of permanently missing a record; it is not a 100% completeness guarantee. It combines an inclusive watermark with a 60-second overlap, idempotent upserts, coverage checks, rescans from page one, and checkpoint advancement only after a complete successful traversal. These measures recover from many concurrent changes and make retries safe. They cannot turn page-number/offset pagination over a live, mutable dataset into a stable snapshot, and no consumer-only algorithm can prove that an unseen record does not exist.
-
-One vendor-side solution is **snapshot pagination**. The first request creates a frozen view of the matching dataset and returns a `snapshot_id`. Every subsequent page includes that ID, so all pages are read from exactly the same view even while live records continue to change. Changes made after the snapshot was created are excluded from that traversal and appear in the next sync. Our service would keep its previous checkpoint until every page in the snapshot had been validated and stored; a failed traversal would retain the old checkpoint and retry safely.
-
-The other vendor-side solution is an append-only **change log**. The vendor records every create, update, and delete as an immutable event with a unique, monotonically increasing sequence number, for example `101: invoice A created`, `102: invoice A paid`, and `103: invoice A deleted`. Our service requests events after its last committed sequence, applies each batch idempotently, and stores the new sequence checkpoint in the same database transaction as the corresponding data changes. A crash before commit replays the batch; a successful commit records both the changes and the checkpoint. Delete events must be represented as tombstones, and the vendor must retain log entries long enough for consumers to read them.
-
-Both designs require support from the vendor. The supplied API provides neither a snapshot token nor a durable ordered change stream, so the current implementation should be described as risk reduction and eventual recovery under the mock's documented behavior, not as an absolute no-loss guarantee.
-
-## ADR-002: PostgreSQL session lock and request retries
-
-Status: accepted for the provided PostgreSQL/Celery stack.
-
-The task acquires PostgreSQL advisory lock `731240001` on the same Django database session used for mirror writes. Competing sessions skip. The lock is released in `finally`; closing/crashing the session also releases it. Losing the session aborts processing rather than reconnecting and continuing without the lock. Only a subsequent lock owner may mark abandoned running records interrupted. Re-delivery of an already completed manual run is a no-op.
-
-Publishing a manual task has an ambiguous failure window: RabbitMQ may accept the message just before the connection fails, so the web process cannot always distinguish that case from a message that was never accepted. The API marks a still-queued run failed and returns HTTP 503. If RabbitMQ later delivers that message, the worker sees the failed run and consumes it without syncing; the administrator can retry, and the 30-minute scheduled sync remains a fallback. This deliberately trades the possible loss of one visibly failed manual attempt for simpler code. A transactional outbox or an additional publication state could close the gap, but was not added because the task does not require guaranteed manual delivery, retries are safe, and a failed attempt is visible and recoverable without risking accounting-data corruption.
-
-The manual enqueue call sets `retry=False`, which disables Celery's producer-side retries when publishing the task; it does not disable the sync's vendor-request retries or retry the task execution itself. This makes a broker connection failure reach the API immediately so it can record the failed run and return HTTP 503. Enabling publication retries could keep the HTTP request waiting and could publish the same run more than once when the outcome of an earlier attempt is unknown. The accepted downside is that a brief broker interruption can fail a manual request that a later publication attempt might have completed. Fast visible failure plus administrator retry and the scheduled fallback are sufficient for the stated requirements, so no publication retry policy was added.
-
-The frontend disables Sync now while its request is pending and while a known run is queued or running, which prevents ordinary repeated clicks in one page. This is a UI guard, not a backend deduplication guarantee: requests from multiple tabs, a reload before a queued run starts, or direct API calls each create their own run and broker message. With one Celery worker process (`--concurrency=1`), queued tasks naturally start one after another; each starts after the previous task releases the lock, so each sync executes and calls the vendor. With multiple worker processes, tasks that start while another process holds the lock cannot acquire it and are marked skipped without calling the vendor. A task that does not start until after the lock is released can still execute, regardless of the configured concurrency. This can create extra run records and vendor traffic, but idempotency prevents duplicate or corrupted accounting data. Backend deduplication was deliberately omitted because the README requires preventing overlapping execution, not collapsing separate requests, and the additional coordination state is not justified for this internal retryable action.
-
-Requests use connect/read timeouts of 3.05/10 seconds, five attempts **total**, exponential backoff and up to 0.5 seconds jitter. Timeouts, connection errors, 429 and 5xx responses retry. Other HTTP errors and malformed payloads fail promptly; 401/403 abort both sources. `Retry-After` accepts both seconds and HTTP dates. No request is sent before its cooldown expires, including when the fifth request fails: one HTTP client shares the remaining cooldown with the other source. A source or whole-run deadline can stop waiting without sending another request. No page number is advanced on a failed request.
-
-A source deadline stops its retries but does not clear a shared 429 cooldown. If invoices times out after 5 seconds of an 18-second cooldown, transactions must still wait the remaining 13 seconds within its own budget. If a global cooldown outlasts both budgets, both sources fail without sending early requests. The independence guarantee concerns endpoint-specific failures, not a vendor-wide prohibition on requests.
-
-The tradeoff is occupying a worker slot during waits. Task-level Celery retry would require persisting traversal state and managing lock ownership across sessions. If measured waits become operationally expensive, introduce persisted resumable work with a lease and then use Celery countdowns. Session advisory locks also require direct PostgreSQL connections or session pooling; transaction pooling is incompatible.
-
-References: [PostgreSQL advisory locks](https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS), [Requests timeouts](https://requests.readthedocs.io/en/latest/user/quickstart/#timeouts).
-
-## Remaining limits / another week
-
-With another week, my main priority would be improving observability and measuring whether the current sync can keep up with the expected data volume and vendor change rate. I would build on the existing run records with per-source metrics for sync duration, time since the last successful sync, request and retry counts, 429 responses, cooldown time, rescan counts, and pagination coverage failures. Separating vendor request time, waiting time, and database write time would help identify the actual bottleneck. I would expose these in an operational dashboard, add alerts for overdue successful syncs and repeated failures, and run controlled load tests with larger datasets and different change rates in a separate test harness.
-
-The outcome would be an evidence-based decision about the next improvement: optimize local writes if database work dominates; discuss rate limits, larger pages, or bulk endpoints with the vendor if API throughput is the constraint; or discuss snapshot pagination or a durable change feed if mutations during pagination repeatedly prevent consistent coverage. Observability would show how well the implementation operates, but would not prove that no records are missed. The current pagination contract already has known completeness limits; if the business requires guaranteed capture of every change, that requirement alone warrants a vendor API discussion, even when all operational metrics look healthy.
-
-Current limitations to assess during that work:
-
-- Frontend dashboard and adjustments UI are now implemented; see the frontend phase below for validation and remaining limits.
-- The whole-sync time limit is a configurable operational guard, not a guarantee that the vendor's dataset can be consumed fast enough. If healthy runs hit it repeatedly, investigate throughput and the vendor API before increasing it.
-- Source timers and Celery's soft limit require Python signal handling to run. A native/runtime hang that prevents this is a global worker failure: the hard limit terminates the process, so the other source cannot continue in that same run. Splitting work into isolated processes/tasks would require a different run/lock lifecycle; it is not needed for the supplied HTTP failure model.
-- Worker death can leave a running record until the next lock owner repairs it. Beat/manual runs provide recovery; there is no immediate crash watchdog. A web-process crash before attempting publication can leave a queued record. Inspect prolonged queued status and trigger a new run if necessary.
-- There is no vendor deletion/tombstone contract, so sync does not infer deletions from missing records.
-- Coverage sets take memory proportional to distinct records in the filtered traversal. Rate limiting is reactive via the vendor's shared 429 cooldown. Neither retries nor a different schedule can solve changes arriving faster than the vendor API can serve them.
-
-## Validation performed
-
-- 38 tests passed on Python 3.12 / Django 5.2.6 / PostgreSQL 16, including real competing PostgreSQL sessions, page rollback, recovery, idempotency, retry/cooldown behavior, validation, reconciliation, API enqueue failure, soft-timeout rollback/lock release, independent source timers, shared cooldown preservation after source expiry, and allowed currency/payment values enforced at both the vendor boundary and database.
-- Real HTTP responses streaming one byte every 50 milliseconds were tested with a Linux/prefork worker and shortened source budgets: stalled invoices failed while transactions succeeded; stalled transactions failed while the successful invoice checkpoint and reconciliation were preserved. A separate hard-timeout check ignored both soft signals and confirmed process termination, lock release and recovery by the replacement worker.
-- A real Linux/prefork Celery worker was tested with a temporary five-second hard limit: the soft limit recorded failure and preserved checkpoints; an intentionally ignored soft signal led to hard termination and PostgreSQL lock release; the replacement worker completed another sync and marked the abandoned run interrupted.
-- Django system checks passed; `makemigrations --check --dry-run` reported no changes; the initial migration applied successfully.
-- End-to-end POST/poll against Docker Django, RabbitMQ and Celery with the vendor's default chaos settings: initial run created 240 invoices and 221 transactions; the second incremental run changed zero records; forced drift updated 5 invoices and added 5 transactions. All three runs succeeded, with no unresolved references.
-- Local port 5432 was occupied. Validation used temporary Docker port overrides (Postgres 55433, backend 18000, vendor 18001) and an isolated test database on 55432. The repository's port configuration is unchanged. Validation services were stopped afterward.
-
-## Task 2: dashboard backend
-
-`GET /api/dashboard/` provides the dashboard read model. It reads the local mirror and never calls the vendor or enqueues a sync. The React page is documented in the frontend phase below.
-
-Response fields:
-
-- `total_invoices`: count of all invoices, including draft, open, paid and void.
-- `outstanding_by_currency`: rows with `currency` and decimal-string `amount`. Outstanding is the sum of `max(total - amount_paid, 0)` for open invoices. Draft/paid/void invoices are excluded; an overpayment does not cancel another invoice's debt.
-- `collected_this_month_by_currency`: gross `payment` amounts grouped by the transaction's own currency, including payments whose invoice has not arrived. Refunds and fees are excluded. No exchange-rate conversion or cross-currency total is invented.
-- `invoices_by_status`: rows with `status` and `count`, for the invoices-by-status chart.
-- `last_sync`: the most recently started execution, including status, start time, records touched and errors. A running execution is included. New queued/skipped requests do not hide an actual previous execution. It is `null` before any sync has started.
-
-Empty grouped results are `[]`; absent currencies/statuses have no matching records. The frontend can display zero or an empty state. Money is always a string with two decimal places, including sums larger than an individual row's DecimalField capacity. Pages committed during an ongoing sync can be visible to the dashboard; these queries do not promise an atomic snapshot across both resources.
-
-The existing `POST /api/sync-runs/` supplies immediate HTTP 202 feedback and an ID for the Sync now button; `GET /api/sync-runs/<id>/` supports polling. Refresh the dashboard when that run finishes. Broker publication failures return HTTP 503.
-
-All counts, sums, subtraction, clamping and grouping execute in PostgreSQL using ORM count/annotate expressions. No invoice/transaction queryset is iterated in Python to calculate figures. The endpoint uses five queries, returns only grouped rows and one run, and has no invoice/transaction joins or N+1 queries. Exact counts/sums still process matching database rows; constant query count does not imply constant database work. Month filtering uses an indexed timestamp range, without applying a month extraction function to the column. Migration `0003_dashboard_query_indexes` adds `(type, occurred_at)` and `SyncRun.started_at` indexes. Apply it with `docker compose exec backend python manage.py migrate`.
-
-Validation: 45 backend tests passed on PostgreSQL, including seven new dashboard cases covering currency separation, exact large totals, overpayments/status exclusions, unresolved payments, refund/fee exclusion, empty state, last-sync selection, and month boundaries across December/year rollover, leap February and a DST transition. With 1,000 invoices and 1,000 transactions, the endpoint still used five queries. Existing enqueue/polling and vendor-failure tests also passed. No dependencies were added.
-
-## Task 3: manual adjustments backend
-
-Implemented only the backend requested for this phase. No authentication, dependencies, frontend changes, or changes to `mock-service/` were added. Apply migration `0004_adjustment` with `docker compose exec backend python manage.py migrate` (fresh `docker compose up --build` applies migrations automatically).
-
-API contract:
-
-- `POST /api/adjustments/` creates an adjustment (201).
-- `GET /api/adjustments/` lists adjustments (200).
-- `GET /api/adjustments/<id>/`, `PUT /api/adjustments/<id>/`, `PATCH /api/adjustments/<id>/`, and `DELETE /api/adjustments/<id>/` provide retrieve, replace, partial update, and delete (200/200/200/204). A missing record returns 404.
-- Writable fields: `invoice` (the local integer invoice ID, not the vendor's external ID), `amount` (decimal string), and `reason`. All three are required for POST/PUT; PATCH validates supplied fields.
-- Responses also contain `id`, `invoice_external_id`, `customer_name`, `currency`, `created_at`, and `updated_at`. Currency and timestamps are server-owned. Invoice labels reflect the current mirror; currency is the adjustment's stored currency.
-- Lists use DRF's `{count, next, previous, results}` envelope. `page` is one-based; `page_size` defaults to 25 and is capped at 100. DRF falls back to the default size for invalid/nonpositive sizes; an invalid or out-of-range page returns 404. Default order is newest first, with ID breaking timestamp ties.
-- Combine the exact `currency=EUR` filter with `search=<text>`. Search matches reason, vendor invoice ID, and customer name using DRF's case-insensitive partial-word search. An invalid currency returns 400 with a field error.
-- The form can find existing invoices through the list-only `GET /api/invoices/?search=...` endpoint with the same pagination. It exposes only the local ID, vendor ID, customer name, and currency needed by the form. There is no invoice detail or write endpoint.
-
-Example (replace `1` with an ID from `/api/invoices/`):
+Frontend checks, from `frontend/`:
 
 ```bash
-curl -X POST http://localhost:8000/api/adjustments/ \
-  -H 'Content-Type: application/json' \
-  -d '{"invoice":1,"amount":"-12.34","reason":"Write-off"}'
-curl 'http://localhost:8000/api/adjustments/?currency=EUR&search=write-off&page=1&page_size=25'
-curl -X PATCH http://localhost:8000/api/adjustments/1/ \
-  -H 'Content-Type: application/json' \
-  -d '{"amount":"-10.00","reason":"Corrected write-off"}'
+npm run typecheck
+npm run lint
+npm run build
+npm test
 ```
 
-Validation returns HTTP 400 with field-to-message-list errors, for example `{"amount":["Amount must not be zero."]}`. The future frontend can map these directly to react-hook-form fields. Invoice must exist. Amount accepts positive/negative values up to 16 integer digits and two decimal places, rejects zero, excess precision, nonfinite values, and JSON numbers (send strings to avoid floating-point precision loss). The existing vendor money field is shared with this API. Reason is trimmed, required, nonblank, and limited to 1,000 characters. No silent rounding or limit based on invoice balance is applied; corrections may apply to any synced invoice status. PostgreSQL additionally enforces nonzero amounts, supported currencies, and referential integrity.
+Frontend tests use Node's built-in runner with TypeScript stripping and require Node 22.18+ or Node 24. Backend tests use real PostgreSQL and stub vendor HTTP responses with the existing `responses` dependency.
 
-### ADR-003: locally owned corrections and stored currency
+Beat runs the sync every 1,800 seconds. `ACCOUNTING_SYNC_INTERVAL_SECONDS` controls this interval; `ACCOUNTING_SYNC_OVERLAP_SECONDS` defaults to 60. These settings must reach the worker/beat environment as appropriate. Compose forwards `ACCOUNTING_SYNC_TIME_LIMIT_SECONDS` to the backend, worker and beat; for example, `ACCOUNTING_SYNC_TIME_LIMIT_SECONDS=1800 docker compose up -d` sets a 30-minute execution limit.
 
-Status: accepted for this take-home.
+Manual sync uses `POST /api/sync-runs/`; it returns HTTP 202 and a stored run ID. Poll `GET /api/sync-runs/<id>/` for the result. Publication failure returns HTTP 503 with a recorded failed run.
 
-Task 3 requires storing corrections independently of the vendor mirror. Adjustments therefore have a separate table and a required `PROTECT` foreign key to the stable local invoice ID. Django refuses deletion of an invoice with adjustments; the database foreign key also prevents orphaning them. Users can explicitly delete adjustments through their own CRUD endpoint. Sync still only writes invoices/transactions and never writes this table.
+## Decisions and tradeoffs
 
-The working convention is that negative amounts represent a reduction and positive amounts an increase. Amounts are stored as `DecimalField(18, 2)`; zero corrections are rejected. Currency is copied from the selected invoice when creating an adjustment, then preserved even if a later sync changes the invoice's currency. Updating amount/reason or submitting the same invoice again preserves that currency. Explicitly reassigning to another invoice captures the new invoice's currency; the supplied/retained numeric amount is then denominated in that currency, with no conversion. The frontend should show the selected currency alongside the amount before submission.
+### Page commits, independent checkpoints and idempotency
 
-Task 3 requests recording corrections, so these records do not mutate vendor balances or alter Task 2's dashboard totals. Net adjusted outstanding, FX conversion, and accounting posting rules would need a separate specified calculation. This also avoids silently adding amounts from different currencies.
+Invoices and transactions have separate checkpoints and time budgets. Each page is fully validated, then its upserts and progress counters commit in one database transaction. A failed page rolls back without discarding earlier pages. An incomplete source keeps its previous checkpoint, so a later run can replay safely. Either source failing makes the overall run failed, while the other can still succeed unless a global failure, such as invalid credentials or a lost database session, prevents it.
 
-Deriving currency on every read would be smaller but could silently reinterpret an existing correction after an upstream currency change. Storing a currency snapshot costs one small column and keeps the amount meaningful. If later requirements allow corrections in an independently selected currency, retain this column and make it explicitly selectable/validated; existing rows need no currency backfill. Changes to posting or net-balance calculations need separate domain rules and tests before inclusion in the dashboard.
+I chose page commits to avoid holding a transaction open across network waits and losing all progress on failure. The cost is partial visibility: the dashboard can see committed pages before the whole sync finishes.
 
-List queries paginate in PostgreSQL and join the invoice once with `select_related`, avoiding one extra query per adjustment. A composite `(created_at DESC, id DESC)` index supports default listing and the invoice foreign key is indexed. Substring search still scans matching text; a full-text/trigram search index is deferred until measured data size warrants it. Offset pages can shift when rows are created/deleted between requests. Concurrent edits use ordinary CRUD last-write-wins behavior; an audit trail or optimistic concurrency can be added if finance's workflow requires them.
+Unique vendor IDs prevent duplicate records. Existing rows are fetched in bulk for each page; unchanged payloads incur no write. Payloads are compared field by field and applied in received order, including duplicate IDs. Timestamp equality is not enough to skip a payload: content can change within the same second, and the mock can move a future seed timestamp back to the present. `records_touched` counts committed create/update operations, not distinct IDs.
 
-The React form/table and server-error mapping are covered in the frontend phase below. With another week, confirm sign/posting rules with finance before computing adjusted totals, and evaluate whether edit history or conflict detection is needed.
+Transactions retain the vendor's invoice ID separately from their nullable local foreign key. After processing both sources, a database update links all resolvable transactions, including older ones absent from the current response. A changed vendor invoice reference clears the old local link first. Unresolved references are reported separately and do not fail the sync.
 
-Validation: 70 backend tests passed on Python 3.12 / Django 5.2.6 / PostgreSQL 16, covering exact signed amounts, field validation, currency preservation/reassignment, filter/search/pagination, list-only invoice lookup, database constraints, protected invoice deletion, and adjustment survival through successful/failed/replayed syncs with duplicate and changed vendor payloads. Lists used two queries for both 25-row and 100-row pages. Django system checks and `makemigrations --check --dry-run` passed; all migrations, including `0004_adjustment`, applied successfully to a fresh temporary database. Tests used the existing backend Docker image with the current source mounted and an isolated PostgreSQL container, without changing the project's data, services, port configuration, or vendor chaos defaults. The temporary database was stopped after validation.
+### Incremental boundaries and changing pagination
 
-## Frontend: dashboard and manual adjustments
+The first sync is a full scan. Later requests use the committed watermark minus a configurable 60-second overlap, with the same filter across every page and rescan. The vendor's inclusive filter is preserved: no epsilon is added to skip equal timestamps.
 
-Completed Tasks 2 and 3 using the existing React/MUI stack and feature structure. No application dependencies were added. The example health feature was removed; the two existing routes now contain working pages. `frontend/package-lock.json` records the resolved dependencies for reproducible installs. The backend and mock-service source are unchanged.
+The overlap deliberately re-reads records just before the boundary. It can recover newly visible records with slightly older timestamps, for example because of delayed visibility, differing timestamp precision or clock skew. These are defensive integration scenarios, not claims that the mock implements replicas or caches. Idempotent upserts make replay safe; the cost is extra reads and validation. Sixty seconds is a chosen tolerance, not a guaranteed bound on vendor delay.
 
-Run `npm ci` and `npm run dev` in `frontend/`. The existing Vite proxy forwards `/api` to port 8000; use `VITE_API_PROXY_TARGET=http://localhost:<port> npm run dev` for another backend port. Check with `npm run typecheck`, `npm run lint`, `npm run build`, and `npm test`. The tests use Node's built-in runner with TypeScript stripping (Node 22.18+ or Node 24); no test framework was added.
+After a successful traversal, the new watermark uses `min(latest, started)`, or `started` for an empty scan, and never moves backwards from its previous value. Capping it at the source's start time is deliberate: a future `updated_at` from the mock must not push the filter into the future and hide subsequent changes dated before that value.
 
-Decisions:
+Each traversal collects unique IDs and the set of reported totals. A changing total or a unique-ID count that does not match it triggers a restart from page one, with fresh coverage sets. Three traversals is the chosen cap to bound work; persistent inconsistency fails the source without advancing its checkpoint. It can indicate dataset churn or inconsistent vendor responses, not necessarily a rate-limit problem.
 
-- The dashboard displays server-provided totals separately by currency. Money stays as decimal strings through form validation, requests and display; formatting only inserts separators, so even large aggregate totals keep their cents. Adjustments do not alter dashboard totals.
-- A bar chart shows invoice counts by status. Loading, error and empty states are explicit. The layout uses the existing theme and switches to top navigation on small screens; the table scrolls horizontally when necessary.
-- Manual sync requests receive immediate queued feedback and are polled by their returned ID every three seconds until a final status. The Sync status card displays that request or the latest execution. Completing a manual run, including failure after partial progress, invalidates dashboard, invoice and adjustment queries. POST is not retried automatically, and the button prevents repeated submissions while a known sync is active. The backend remains responsible for concurrent-run exclusion.
-- The adjustment dialog serves both create and edit. Invoice search is debounced by 300 ms and returns up to 25 matches; users narrow the search instead of downloading all invoices. Existing selections are populated from the table row, so editing does not depend on finding that invoice on the first lookup page. The stored currency is retained for the original invoice; choosing another invoice displays its currency and an explicit no-conversion message.
-- Yup validates signed, nonzero decimal amounts (up to 16 integer digits and two fractional digits) and a trimmed reason of at most 1,000 characters. DRF field errors map to the corresponding input; non-field/network errors appear inside the dialog. Submission disables controls until it finishes.
-- The DataGrid uses server pagination with 10/25/50/100 rows, plus an explicit Apply/Clear search and currency filter form. Sorting is disabled to avoid sorting only a single server page. Filter/page values are in query keys; previous rows remain visible under a loading indicator between requests. Writes invalidate list queries and return to the first page, including deletion of the only row on a later page. Delete requires confirmation; cancel performs no write.
+This detects some offset-pagination inconsistencies, but matching counts do not prove snapshot completeness or that every version is current. Stronger guarantees require vendor support, such as a frozen snapshot across pages or a durable ordered change feed. Retrying more cannot establish those guarantees.
 
-Validation performed:
+### Concurrency, retries and bounded execution
 
-- TypeScript checks, ESLint and the production build passed. Four focused tests passed for exact formatting of large totals, signed decimal payloads, invalid amounts and required invoice/reason fields.
-- Headless Chromium checks with controlled API responses passed for queued/running/succeeded/failed syncs, tracking after reload, dashboard refresh after completion, exact large monetary values, empty/error/retry states, create/edit/delete and cancellation, client/server field errors, non-field errors, server search/pagination, and deletion of the last row on page two. No React/page errors were observed. Desktop and mobile screenshots were inspected; the chart's axis height was adjusted so all status labels render.
-- A second browser check used the real Django API through Vite: loaded the dashboard/chart, searched invoices, created one marked test correction, filtered the list, edited the correction with its existing invoice and removed that correction. All operations returned the expected 201/200/204 responses. A real manual sync through Django/RabbitMQ/Celery succeeded with 34 committed create/update operations.
-- Docker validation used the existing temporary Compose override that removes the PostgreSQL host port mapping, because another project owns port 5432. No repository Compose changes or vendor failure-rate changes were made.
+A PostgreSQL session advisory lock on the same connection used for writes prevents overlapping syncs. Losing that connection aborts processing; reconnecting would not restore ownership of the lock. Normal exit or session closure releases it. A later lock owner marks abandoned running executions `interrupted`.
 
-Remaining limits: Vite reports a bundle-size warning (about 1.47 MB minified / 454 KB gzip). The straightforward static imports were retained for this exercise; route-level lazy loading is a possible follow-up. Invoice lookup intentionally requires refining searches beyond the first 25 matches. Concurrent adjustment edits retain the backend's last-write-wins behavior, and sync tracking is per browser tab. The temporary browser checks are validation scripts, not an added Playwright dependency or a maintained browser-test suite.
+Vendor requests have connect/read timeouts of 3.05/10 seconds and five attempts total, with exponential backoff and up to 0.5 seconds jitter. Transient network failures, 429 and 5xx responses retry the same page. Other HTTP errors and malformed payloads fail promptly; 401/403 stop both sources. `Retry-After` accepts seconds or an HTTP date. Both sources share the remaining cooldown, even after the last failed attempt or a source timeout, so switching sources cannot bypass the vendor's rate limit.
+
+The 40-minute default whole-task limit and equal per-source budgets are implementation choices for bounded execution. The soft limit normally fires 30 seconds before the hard limit; after reserving finalization time, each source gets 19 minutes 30 seconds by default. A source timeout preserves committed work and gives the next source its own budget. After rollback, counters are reloaded from the database because Python objects do not roll back automatically.
+
+The soft limit records `failed` and performs cleanup; the hard limit terminates a stuck worker child. A hard kill can leave the run marked `running` until the next lock owner repairs it. These mechanisms rely on the Docker Linux/prefork worker and signal handling; direct `run_sync()` calls or eager/solo mode do not enforce Celery's task limits. Waiting occupies a worker slot, and session advisory locks require direct connections or session pooling, not transaction pooling.
+
+Manual publication uses `retry=False` to surface broker failures promptly. If RabbitMQ accepted a message just before the connection failed, the API can still record that queued run as failed; a later delivery is consumed without syncing. I accepted this visible, retryable failure instead of adding an outbox, because guaranteed manual delivery is not required and scheduled sync remains a fallback.
+
+The UI prevents ordinary repeated clicks, but separate requests are separate runs. The lock prevents concurrent execution, not sequential queued runs; a task starting after the lock is released may sync again. Delivery of an already completed manual run is a no-op.
+
+### Financial correctness and dashboard queries
+
+Money uses `DecimalField(18, 2)` and decimal strings in API payloads and frontend forms/display. Supported currencies and transaction types/methods are validated in serializers and database constraints. No implicit rounding, currency conversion or cross-currency total is performed.
+
+Dashboard definitions are explicit:
+
+- Invoice count includes all statuses.
+- Outstanding is the sum of `max(total - amount_paid, 0)` for open invoices, grouped by currency. An overpayment does not cancel another invoice's debt.
+- Collections this month are gross `payment` amounts in each transaction's currency, including payments with an unresolved invoice. Refunds and fees are excluded.
+- Sync health shows the most recently started execution, including a running one; queued/skipped requests do not hide it.
+
+All aggregation runs in PostgreSQL. The dashboard uses five queries and indexed timestamp ranges for month filtering. Constant query count still involves processing matching rows; it does not imply constant database work.
+
+### Locally owned adjustments and frontend behavior
+
+Adjustments live in a separate table that sync never writes. Their required `PROTECT` foreign key prevents deleting an invoice with adjustments. Amounts must be nonzero decimal strings; the invoice must exist and the trimmed reason must be nonempty and at most 1,000 characters. Negative amounts mean reductions and positive amounts mean increases.
+
+Currency is copied from the invoice when the adjustment is created and preserved if that invoice later changes currency. Explicitly choosing a different invoice adopts its currency without converting the amount; the UI explains this. Keeping a stored currency avoids silently changing the meaning of old corrections.
+
+Adjustments do not change vendor balances or dashboard totals: Task 3 asks to record corrections, and applying them to balances would need additional accounting rules. Lists use server pagination, filtering/search and `select_related` to avoid N+1 queries.
+
+The frontend uses the required React/MUI, TanStack Query, react-hook-form and yup stack. It handles loading, error and empty states, maps server field errors to inputs, polls manual sync every three seconds and refreshes relevant queries when it finishes. Invoice search is debounced and fetches up to 25 matches rather than all invoices. Table sorting is disabled because sorting only the current server page would be misleading. Deletion requires confirmation.
+
+## What I would do with another week
+
+My priority would be observability and measuring whether the current sync keeps up with expected data volume and vendor changes. I would track per-source duration, time since the last successful sync, request/retry counts, 429 responses, cooldown time, rescans and coverage failures. Separating vendor latency, waiting and database write time would identify the bottleneck. An operational dashboard, alerts for overdue successful syncs/repeated failures, and controlled load tests in a separate harness would make the results actionable.
+
+I would then optimize local writes if database work dominates; discuss rate limits, larger pages or bulk endpoints if API throughput is the constraint; or discuss snapshots/change feeds if live pagination repeatedly produces inconsistent coverage. Healthy metrics cannot prove that no records are missing. If the business requires guaranteed capture of every change, that requirement already warrants a vendor API discussion.
+
+## Known limitations and unfinished work
+
+- The current API offers no snapshot, durable change stream or deletion/tombstone contract. Matching counts can miss dataset changes; old records skipped in the initial scan and changes outside the overlap are not guaranteed to be recovered. There is no recurring full rescan or inferred deletion.
+- There is no immediate watchdog for abandoned runs, guaranteed manual message delivery or queue deduplication. A web-process crash before publication can leave a queued record; a worker crash can leave a running record until a later run repairs it.
+- Throughput is bounded by vendor rate limits and page size. Coverage sets use memory proportional to the distinct IDs in a traversal. A source cannot continue in the same worker after a hard kill of that worker.
+- Adjustment edits use last-write-wins behavior; edit history and conflict detection are not implemented.
+- Invoice lookup requires refining searches beyond the first 25 matches. Sync tracking is per browser tab.
+- The frontend build reports a bundle-size warning (previously measured at about 1.47 MB minified / 454 KB gzip); route-level lazy loading is not implemented.
+- Browser checks were temporary validation scripts, not a maintained browser-test suite.
+
+## Validation summary
+
+During implementation, PostgreSQL-backed tests covered replay/idempotency, mid-page rollback, independent checkpoints, lock contention and recovery, retries/shared cooldowns, source/task timeouts, future and equal timestamps, pagination coverage, currency separation, dashboard totals and adjustment validation/isolation. The latest sync-only run recorded in this work passed all 39 tests; earlier full-backend validation recorded 70 passing tests.
+
+Django checks and migration consistency checks passed. Frontend type checking, lint, production build and four money/form tests passed. Browser checks exercised sync feedback, loading/error/empty states and adjustment CRUD with both controlled responses and the real API. Real Celery/prefork tests also exercised slow HTTP streams and soft/hard termination. These are recorded implementation results, not a claim that the checks were rerun for this documentation edit.
