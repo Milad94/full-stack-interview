@@ -371,14 +371,14 @@ def test_source_timeout_does_not_prevent_other_source(vendor, monkeypatch, setti
     settings.ACCOUNTING_SYNC_SOURCE_TIME_LIMIT_SECONDS = 0.2
     vendor.page("invoices", [invoice()])
     vendor.page("transactions", [payment()])
-    original = VendorClient.page
+    original = VendorClient.fetch_page
 
     def slow_page(client, source, *args):
         if source == slow_source:
             Event().wait(5)  # A real blocking call, interrupted by SIGALRM.
         return original(client, source, *args)
 
-    monkeypatch.setattr(VendorClient, "page", slow_page)
+    monkeypatch.setattr(VendorClient, "fetch_page", slow_page)
     run = run_sync()
     healthy_source = "transactions" if slow_source == "invoices" else "invoices"
     assert run.status == "failed"
@@ -396,14 +396,14 @@ def test_source_budget_covers_all_pages_and_is_not_reset_per_request(vendor, mon
     vendor.page("invoices", [invoice()], total=2, next_page=2)
     vendor.page("invoices", [invoice("INV-2")], number=2, total=2)
     vendor.page("transactions", [payment()])
-    original = VendorClient.page
+    original = VendorClient.fetch_page
 
     def slow_pages(client, source, *args):
         if source == "invoices":
             Event().wait(0.25)
         return original(client, source, *args)
 
-    monkeypatch.setattr(VendorClient, "page", slow_pages)
+    monkeypatch.setattr(VendorClient, "fetch_page", slow_pages)
     run = run_sync()
     assert run.sources["invoices"]["status"] == "failed"
     assert run.sources["invoices"]["created"] == 1

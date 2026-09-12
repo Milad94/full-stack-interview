@@ -120,14 +120,16 @@ def sync_source(run, source, client, check_session):
             latest = None
             for scan in range(1, MAX_SCANS + 1):
                 seen, totals = set(), set()
-                page = 1
+                page_number = 1
                 result["scans"] = scan
-                while page is not None:
-                    payload = client.page(source, page, since)
+                while page_number is not None:
+                    payload = client.fetch_page(source, page_number, since)
                     check_session()
                     serializer = serializer_class(data=payload["items"], many=True)
                     if not serializer.is_valid():
-                        raise VendorError(f"{source} page {page}: invalid records: {serializer.errors}")
+                        raise VendorError(
+                            f"{source} page {page_number}: invalid records: {serializer.errors}"
+                        )
                     rows = serializer.validated_data
                     with transaction.atomic():
                         counts = store_page(model, rows)
@@ -141,7 +143,7 @@ def sync_source(run, source, client, check_session):
                         stamp = row["vendor_updated_at"]
                         latest = stamp if latest is None else max(latest, stamp)
                     totals.add(payload["total"])
-                    page = payload["next_page"]
+                    page_number = payload["next_page"]
                 # Reset seen/totals each pass: IDs from a previous pass must not mask
                 # a missing row in this pass. This detects drift, not a true snapshot.
                 if len(totals) == 1 and len(seen) == next(iter(totals)):

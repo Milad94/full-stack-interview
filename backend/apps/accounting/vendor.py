@@ -81,8 +81,8 @@ class VendorClient:
     def close(self):
         self.session.close()
 
-    def page(self, source, page, updated_since):
-        params = {"page": page, "page_size": self.page_size}
+    def fetch_page(self, source, page_number, updated_since):
+        params = {"page": page_number, "page_size": self.page_size}
         if updated_since is not None:
             params["updated_since"] = updated_since.isoformat()
         url = f"{settings.EXTERNAL_ACCOUNTING_BASE_URL.rstrip('/')}/api/v1/{source}"
@@ -100,36 +100,46 @@ class VendorClient:
                     try:
                         payload = response.json()
                     except ValueError as exc:
-                        raise VendorError(f"{source} page {page}: invalid JSON") from exc
-                    self.validate_page(payload, source, page)
+                        raise VendorError(f"{source} page {page_number}: invalid JSON") from exc
+                    self.validate_page(payload, source, page_number)
                     return payload
                 error = f"HTTP {response.status_code}"
                 if response.status_code in (401, 403):
-                    raise VendorAuthError(f"{source} page {page}: {error}")
+                    raise VendorAuthError(f"{source} page {page_number}: {error}")
                 if response.status_code != 429 and not 500 <= response.status_code < 600:
-                    raise VendorError(f"{source} page {page}: {error}")
+                    raise VendorError(f"{source} page {page_number}: {error}")
                 if response.status_code == 429:
                     self.cooldown_until = max(
                         self.cooldown_until,
                         time.monotonic() + retry_after_seconds(response.headers.get("Retry-After")),
                     )
             # Preserve cooldown even on the final attempt, for the next source.
-            logger.warning("Vendor %s page %s attempt %s/%s: %s", source, page, attempt + 1, self.attempts, error)
+            logger.warning(
+                "Vendor %s page %s attempt %s/%s: %s",
+                source,
+                page_number,
+                attempt + 1,
+                self.attempts,
+                error,
+            )
             if attempt + 1 < self.attempts:
                 self.cooldown_until = max(self.cooldown_until, time.monotonic() + 2**attempt + random.uniform(0, 0.5))
-        raise VendorError(f"{source} page {page}: {error} after {self.attempts} attempts")
+        raise VendorError(f"{source} page {page_number}: {error} after {self.attempts} attempts")
 
-    def validate_page(self, payload, source, page):
+    def validate_page(self, payload, source, page_number):
         if not isinstance(payload, dict):
-            raise VendorError(f"{source} page {page}: invalid page envelope")
+            raise VendorError(f"{source} page {page_number}: invalid page envelope")
         items, total, next_page = payload.get("items"), payload.get("total"), payload.get("next_page")
         if (
-            payload.get("page") != page
+            payload.get("page") != page_number
             or payload.get("page_size") != self.page_size
             or not isinstance(items, list)
             or len(items) > self.page_size
             or type(total) is not int or total < 0
             or "next_page" not in payload
-            or (next_page is not None and (type(next_page) is not int or next_page != page + 1 or not items))
+            or (
+                next_page is not None
+                and (type(next_page) is not int or next_page != page_number + 1 or not items)
+            )
         ):
-            raise VendorError(f"{source} page {page}: invalid pagination metadata")
+            raise VendorError(f"{source} page {page_number}: invalid pagination metadata")
