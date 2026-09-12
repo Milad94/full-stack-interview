@@ -94,6 +94,12 @@ References: [PostgreSQL advisory locks](https://www.postgresql.org/docs/16/expli
 
 ## Remaining limits / another week
 
+With another week, my main priority would be improving observability and measuring whether the current sync can keep up with the expected data volume and vendor change rate. I would build on the existing run records with per-source metrics for sync duration, time since the last successful sync, request and retry counts, 429 responses, cooldown time, rescan counts, and pagination coverage failures. Separating vendor request time, waiting time, and database write time would help identify the actual bottleneck. I would expose these in an operational dashboard, add alerts for overdue successful syncs and repeated failures, and run controlled load tests with larger datasets and different change rates in a separate test harness.
+
+The outcome would be an evidence-based decision about the next improvement: optimize local writes if database work dominates; discuss rate limits, larger pages, or bulk endpoints with the vendor if API throughput is the constraint; or discuss snapshot pagination or a durable change feed if mutations during pagination repeatedly prevent consistent coverage. Observability would show how well the implementation operates, but would not prove that no records are missed. The current pagination contract already has known completeness limits; if the business requires guaranteed capture of every change, that requirement alone warrants a vendor API discussion, even when all operational metrics look healthy.
+
+Current limitations to assess during that work:
+
 - Frontend dashboard and adjustments UI are now implemented; see the frontend phase below for validation and remaining limits.
 - The whole-sync time limit is a configurable operational guard, not a guarantee that the vendor's dataset can be consumed fast enough. If healthy runs hit it repeatedly, investigate throughput and the vendor API before increasing it.
 - Source timers and Celery's soft limit require Python signal handling to run. A native/runtime hang that prevents this is a global worker failure: the hard limit terminates the process, so the other source cannot continue in that same run. Splitting work into isolated processes/tasks would require a different run/lock lifecycle; it is not needed for the supplied HTTP failure model.
