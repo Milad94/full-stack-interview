@@ -69,7 +69,7 @@ Vendor requests have connect/read timeouts of 3.05/10 seconds and five attempts 
 
 The 40-minute default whole-task limit and equal per-source budgets are implementation choices for bounded execution. The soft limit normally fires 30 seconds before the hard limit; after reserving finalization time, each source gets 19 minutes 30 seconds by default. A source timeout preserves committed work and gives the next source its own budget. After rollback, counters are reloaded from the database because Python objects do not roll back automatically.
 
-The soft limit records `failed` and performs cleanup; the hard limit terminates a stuck worker child. A hard kill can leave the run marked `running` until the next lock owner repairs it. These mechanisms rely on the Docker Linux/prefork worker and signal handling; direct `run_sync()` calls or eager/solo mode do not enforce Celery's task limits. Waiting occupies a worker slot, and session advisory locks require direct connections or session pooling, not transaction pooling.
+The soft limit records `failed` and performs cleanup; the hard limit terminates a stuck worker child. A hard kill can leave the run marked `running` until the next lock owner repairs it. These mechanisms are enforced by the supplied Docker Linux/prefork worker and its signal handling. Waiting occupies a worker slot, and session advisory locks require direct connections or session pooling, not transaction pooling.
 
 Manual publication uses `retry=False` to surface broker failures promptly. If RabbitMQ accepted a message just before the connection failed, the API can still record that queued run as failed; a later delivery is consumed without syncing. I accepted this visible, retryable failure instead of adding an outbox, because guaranteed manual delivery is not required and scheduled sync remains a fallback.
 
@@ -94,7 +94,7 @@ Adjustments live in a separate table that sync never writes. Their required `PRO
 
 Currency is copied from the invoice when the adjustment is created and preserved if that invoice later changes currency. Explicitly choosing a different invoice adopts its currency without converting the amount; the UI explains this. Keeping a stored currency avoids silently changing the meaning of old corrections.
 
-Adjustments do not change vendor balances or dashboard totals: Task 3 asks to record corrections, and applying them to balances would need additional accounting rules. Lists use server pagination, filtering/search and `select_related` to avoid N+1 queries.
+Adjustments are intentionally a record-only CRUD feature and do not change vendor balances or dashboard totals. The brief does not define which balance component a correction affects, its effective date, type-specific accounting, or its lifecycle; applying one would therefore invent accounting rules. Lists use server pagination, filtering/search and `select_related` to avoid N+1 queries.
 
 The frontend uses the required React/MUI, TanStack Query, react-hook-form and yup stack. It handles loading, error and empty states, maps server field errors to inputs, polls manual sync every three seconds and refreshes relevant queries when it finishes. Invoice search is debounced and fetches up to 25 matches rather than all invoices. Table sorting is disabled because sorting only the current server page would be misleading. Deletion requires confirmation.
 
@@ -109,6 +109,7 @@ I would then optimize local writes if database work dominates; discuss rate limi
 - The current API offers no snapshot, durable change stream or deletion/tombstone contract. Matching counts can miss dataset changes; old records skipped in the initial scan and changes outside the overlap are not guaranteed to be recovered. There is no recurring full rescan or inferred deletion.
 - There is no immediate watchdog for abandoned runs, guaranteed manual message delivery or queue deduplication. A web-process crash before publication can leave a queued record; a worker crash can leave a running record until a later run repairs it.
 - Throughput is bounded by vendor rate limits and page size. Coverage sets use memory proportional to the distinct IDs in a traversal. A source cannot continue in the same worker after a hard kill of that worker.
+- Adjustment reconciliation is not implemented. If the vendor later corrects an invoice that already has a local adjustment, the local record remains unchanged; the system cannot tell whether it is still needed, has become stale, or would double-count the correction if adjustments were later applied to totals.
 - Adjustment edits use last-write-wins behavior; edit history and conflict detection are not implemented.
 - Invoice lookup requires refining searches beyond the first 25 matches. Sync tracking is per browser tab.
 - The frontend build reports a bundle-size warning (previously measured at about 1.47 MB minified / 454 KB gzip); route-level lazy loading is not implemented.
