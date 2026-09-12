@@ -1,6 +1,6 @@
 # Implementation notes
 
-Tasks 1–3 are implemented: accounting sync, the dashboard, and manual adjustments. The supplied stack is retained, no application dependencies were added, and `mock-service/` and its default failure settings are unchanged. [Persian version](NOTES.fa.md).
+Tasks 1–3 are implemented: accounting sync, the dashboard, and manual adjustments. The supplied stack is retained, no application dependencies were added, and `mock-service/` and its default failure settings are unchanged. 
 
 ## Running and checking the project
 
